@@ -1,8 +1,10 @@
 use std::io::{self, Write};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gpio_cdev::{Chip, LineHandle, LineRequestFlags};
+use image::{DynamicImage, GenericImageView, RgbImage};
 use spidev::{SpiModeFlags, Spidev, SpidevOptions};
 
 const UC8159_PSR: u8 = 0x00;
@@ -22,6 +24,26 @@ const UC8159_PWS: u8 = 0xE3;
 
 const SPI_CHUNK_SIZE: usize = 4096;
 
+const DESATURATED_PALETTE: [[u8; 3]; 7] = [
+    [0, 0, 0],
+    [255, 255, 255],
+    [0, 255, 0],
+    [0, 0, 255],
+    [255, 0, 0],
+    [255, 255, 0],
+    [255, 140, 0],
+];
+
+const SATURATED_PALETTE: [[u8; 3]; 7] = [
+    [57, 48, 57],
+    [255, 255, 255],
+    [58, 91, 70],
+    [61, 59, 94],
+    [156, 72, 75],
+    [208, 190, 71],
+    [177, 106, 73],
+];
+
 #[derive(Debug)]
 pub enum InkyError {
     Io(io::Error),
@@ -29,6 +51,7 @@ pub enum InkyError {
     Timeout(&'static str, Duration),
     InvalidBufferSize { expected: usize, received: usize },
     UnsupportedResolution(u16, u16),
+    Image(image::ImageError),
 }
 
 impl std::fmt::Display for InkyError {
@@ -48,6 +71,7 @@ impl std::fmt::Display for InkyError {
             InkyError::UnsupportedResolution(w, h) => {
                 write!(f, "Unsupported resolution {w}x{h}")
             }
+            InkyError::Image(err) => write!(f, "Image error: {err}"),
         }
     }
 }
@@ -63,6 +87,12 @@ impl From<io::Error> for InkyError {
 impl From<gpio_cdev::errors::Error> for InkyError {
     fn from(err: gpio_cdev::errors::Error) -> Self {
         InkyError::Gpio(err)
+    }
+}
+
+impl From<image::ImageError> for InkyError {
+    fn from(err: image::ImageError) -> Self {
+        InkyError::Image(err)
     }
 }
 
@@ -209,6 +239,19 @@ impl InkyUc8159 {
         self.buffer[index] = colour & 0x07;
     }
 
+    pub fn set_image_from_path<P: AsRef<Path>>(&mut self, path: P, saturation: f32) -> Result<()> {
+        let image = image::open(path)?;
+        self.set_image(&image, saturation)
+    }
+
+    pub fn set_image(&mut self, image: &DynamicImage, saturation: f32) -> Result<()> {
+        let rgb = self.prepare_image(image);
+        let palette = build_palette(saturation);
+        self.quantize_into_buffer(&rgb, &palette);
+
+        Ok(())
+    }
+
     pub fn set_border(&mut self, colour: u8) {
         let value = colour & 0x07;
         if self.border_colour != value {
@@ -351,4 +394,124 @@ impl InkyUc8159 {
         }
         packed
     }
+
+    fn prepare_image(&self, image: &DynamicImage) -> RgbImage {
+        let target_w = self.width as u32;
+        let target_h = self.height as u32;
+
+        let (src_w, src_h) = image.dimensions();
+        if src_w == target_w && src_h == target_h {
+            return image.to_rgb8();
+        }
+
+        let src_ratio = src_w as f32 / src_h as f32;
+        let target_ratio = target_w as f32 / target_h as f32;
+
+        let crop_image: DynamicImage = if (src_ratio - target_ratio).abs() < 1e-6 {
+            image.clone()
+        } else if src_ratio > target_ratio {
+            // source wider than target: crop width
+            let desired_width = ((target_ratio * src_h as f32).round() as u32).clamp(1, src_w);
+            let x = (src_w - desired_width) / 2;
+            image.crop_imm(x, 0, desired_width, src_h)
+        } else {
+            // source taller than target: crop height
+            let desired_height = ((src_w as f32 / target_ratio).round() as u32).clamp(1, src_h);
+            let y = (src_h - desired_height) / 2;
+            image.crop_imm(0, y, src_w, desired_height)
+        };
+
+        let resized =
+            crop_image.resize_exact(target_w, target_h, image::imageops::FilterType::Triangle);
+        resized.to_rgb8()
+    }
+
+    fn quantize_into_buffer(&mut self, rgb: &RgbImage, palette: &[[f32; 3]; 7]) {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let mut working: Vec<[f32; 3]> = rgb
+            .pixels()
+            .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
+            .collect();
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * width + x;
+                let old_pixel = working[idx];
+                let (closest_index, closest_colour) = nearest_colour(palette, old_pixel);
+                self.buffer[idx] = closest_index as u8;
+
+                let error = [
+                    old_pixel[0] - closest_colour[0],
+                    old_pixel[1] - closest_colour[1],
+                    old_pixel[2] - closest_colour[2],
+                ];
+
+                distribute_error(&mut working, width, height, x, y, error);
+            }
+        }
+    }
+}
+
+fn build_palette(saturation: f32) -> [[f32; 3]; 7] {
+    let sat = saturation.clamp(0.0, 1.0);
+    let mut palette = [[0.0f32; 3]; 7];
+    for i in 0..7 {
+        for channel in 0..3 {
+            let saturated = SATURATED_PALETTE[i][channel] as f32;
+            let desaturated = DESATURATED_PALETTE[i][channel] as f32;
+            palette[i][channel] = saturated * sat + desaturated * (1.0 - sat);
+        }
+    }
+    palette
+}
+
+fn nearest_colour(palette: &[[f32; 3]; 7], colour: [f32; 3]) -> (usize, [f32; 3]) {
+    let mut best_index = 0usize;
+    let mut best_distance = f32::MAX;
+    for (idx, candidate) in palette.iter().enumerate() {
+        let dr = colour[0] - candidate[0];
+        let dg = colour[1] - candidate[1];
+        let db = colour[2] - candidate[2];
+        let distance = dr * dr + dg * dg + db * db;
+        if distance < best_distance {
+            best_distance = distance;
+            best_index = idx;
+        }
+    }
+
+    (best_index, palette[best_index])
+}
+
+fn distribute_error(
+    working: &mut [[f32; 3]],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    error: [f32; 3],
+) {
+    let width_usize = width;
+    let height_usize = height;
+
+    let mut apply = |nx: isize, ny: isize, factor: f32| {
+        if nx < 0 || ny < 0 {
+            return;
+        }
+        let nx = nx as usize;
+        let ny = ny as usize;
+        if nx >= width_usize || ny >= height_usize {
+            return;
+        }
+        let idx = ny * width_usize + nx;
+        for channel in 0..3 {
+            let value = working[idx][channel] + error[channel] * factor;
+            working[idx][channel] = value.clamp(0.0, 255.0);
+        }
+    };
+
+    apply((x as isize) + 1, y as isize, 7.0 / 16.0);
+    apply((x as isize) - 1, (y as isize) + 1, 3.0 / 16.0);
+    apply(x as isize, (y as isize) + 1, 5.0 / 16.0);
+    apply((x as isize) + 1, (y as isize) + 1, 1.0 / 16.0);
 }

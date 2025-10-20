@@ -1,6 +1,31 @@
+use clap::Parser;
+use std::path::PathBuf;
+
+#[derive(Parser, Debug)]
+#[command(name = "inkwell", about = "UC8159 demo utility")]
+struct Args {
+    /// Optional PNG to display (must match panel resolution)
+    #[arg(value_name = "IMAGE")]
+    image: Option<PathBuf>,
+
+    /// Palette saturation from 0.0 (desaturated) to 1.0 (saturated)
+    #[arg(short, long, value_name = "SAT", default_value_t = 0.5)]
+    saturation: f32,
+}
+
 #[cfg(target_os = "linux")]
 fn main() {
-    if let Err(err) = run_demo() {
+    let args = Args::parse();
+
+    if let Some(path) = args.image {
+        if let Err(err) = run_image(&path, args.saturation) {
+            eprintln!("Error: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if let Err(err) = run_demo(args.saturation) {
         eprintln!("Error: {err}");
         std::process::exit(1);
     }
@@ -12,10 +37,12 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn run_demo() -> inkwell::uc8159::Result<()> {
+fn run_demo(saturation: f32) -> inkwell::uc8159::Result<()> {
     use inkwell::{InkyUc8159, InkyUc8159Config};
 
     let mut display = InkyUc8159::new(InkyUc8159Config::default())?;
+
+    let _ = saturation;
 
     let colours = [0u8, 1, 2, 3, 4, 5, 6];
     let stripe_height = (display.height() as usize) / colours.len();
@@ -36,5 +63,14 @@ fn run_demo() -> inkwell::uc8159::Result<()> {
         }
     }
 
+    display.show()
+}
+
+#[cfg(target_os = "linux")]
+fn run_image(path: &PathBuf, saturation: f32) -> inkwell::uc8159::Result<()> {
+    use inkwell::{InkyUc8159, InkyUc8159Config};
+
+    let mut display = InkyUc8159::new(InkyUc8159Config::default())?;
+    display.set_image_from_path(path, saturation)?;
     display.show()
 }
