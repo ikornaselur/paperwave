@@ -112,20 +112,20 @@ impl InkyUc8159 {
     pub fn new(config: InkyUc8159Config) -> Result<Self> {
         let mut chip = Chip::new(&config.gpio_chip)?;
 
-        let cs =
-            chip.get_line(config.pins.cs)?
-                .request(LineRequestFlags::OUTPUT, 1, "inkwell-cs")?;
-        let dc =
-            chip.get_line(config.pins.dc)?
-                .request(LineRequestFlags::OUTPUT, 0, "inkwell-dc")?;
+        let cs = chip
+            .get_line(config.pins.cs)?
+            .request(LineRequestFlags::OUTPUT, 1, "paperwave-cs")?;
+        let dc = chip
+            .get_line(config.pins.dc)?
+            .request(LineRequestFlags::OUTPUT, 0, "paperwave-dc")?;
         let reset = chip.get_line(config.pins.reset)?.request(
             LineRequestFlags::OUTPUT,
             1,
-            "inkwell-reset",
+            "paperwave-reset",
         )?;
         let busy =
             chip.get_line(config.pins.busy)?
-                .request(LineRequestFlags::INPUT, 0, "inkwell-busy")?;
+                .request(LineRequestFlags::INPUT, 0, "paperwave-busy")?;
 
         drop(chip);
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "inkwell",
+    name = "paperwave",
     about = "CLI tool to display images on Inky displays"
 )]
 struct Args {
@@ -43,13 +43,13 @@ enum RotationArg {
 }
 
 #[cfg(target_os = "linux")]
-impl From<RotationArg> for inkwell::Rotation {
+impl From<RotationArg> for paperwave::Rotation {
     fn from(value: RotationArg) -> Self {
         match value {
-            RotationArg::Deg0 => inkwell::Rotation::Deg0,
-            RotationArg::Deg90 => inkwell::Rotation::Deg90,
-            RotationArg::Deg180 => inkwell::Rotation::Deg180,
-            RotationArg::Deg270 => inkwell::Rotation::Deg270,
+            RotationArg::Deg0 => paperwave::Rotation::Deg0,
+            RotationArg::Deg90 => paperwave::Rotation::Deg90,
+            RotationArg::Deg180 => paperwave::Rotation::Deg180,
+            RotationArg::Deg270 => paperwave::Rotation::Deg270,
         }
     }
 }
@@ -58,7 +58,7 @@ impl From<RotationArg> for inkwell::Rotation {
 fn main() {
     let args = Args::parse();
     let rotation = args.rotation.into();
-    let probe = inkwell::probe_system();
+    let probe = paperwave::probe_system();
 
     if args.debug || args.detect_only {
         print_probe(&probe);
@@ -89,17 +89,17 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn run_demo(
-    rotation: inkwell::Rotation,
+    rotation: paperwave::Rotation,
     saturation: f32,
-    probe: &inkwell::ProbeInfo,
-) -> inkwell::Result<()> {
+    probe: &paperwave::ProbeInfo,
+) -> paperwave::Result<()> {
     let mut display = create_display(rotation, probe)?;
 
     let (input_w, input_h) = display.input_dimensions();
     let mut image = RgbImage::new(input_w as u32, input_h as u32);
 
     let palette: Vec<Rgb<u8>> = match probe.display {
-        Some(inkwell::DisplaySpec::El133Uf1 { .. }) => vec![
+        Some(paperwave::DisplaySpec::El133Uf1 { .. }) => vec![
             Rgb([0, 0, 0]),
             Rgb([255, 255, 255]),
             Rgb([255, 255, 0]),
@@ -143,34 +143,34 @@ fn run_demo(
 
 #[cfg(target_os = "linux")]
 fn create_display(
-    rotation: inkwell::Rotation,
-    probe: &inkwell::ProbeInfo,
-) -> inkwell::Result<Box<dyn inkwell::InkyDisplay>> {
-    use inkwell::InkyDisplay;
+    rotation: paperwave::Rotation,
+    probe: &paperwave::ProbeInfo,
+) -> paperwave::Result<Box<dyn paperwave::InkyDisplay>> {
+    use paperwave::InkyDisplay;
 
     match probe.display {
-        Some(inkwell::DisplaySpec::El133Uf1 { width, height }) => {
-            let mut config = inkwell::InkyEl133Uf1Config::default();
+        Some(paperwave::DisplaySpec::El133Uf1 { width, height }) => {
+            let mut config = paperwave::InkyEl133Uf1Config::default();
             config.width = width;
             config.height = height;
             config.rotation = rotation;
-            let mut display = inkwell::InkyEl133Uf1::new(config)?;
+            let mut display = paperwave::InkyEl133Uf1::new(config)?;
             display.set_rotation(rotation);
             Ok(Box::new(display))
         }
-        Some(inkwell::DisplaySpec::Uc8159 { width, height, .. }) => {
-            let mut config = inkwell::InkyUc8159Config::default();
+        Some(paperwave::DisplaySpec::Uc8159 { width, height, .. }) => {
+            let mut config = paperwave::InkyUc8159Config::default();
             config.width = width;
             config.height = height;
             config.rotation = rotation;
-            let mut display = inkwell::InkyUc8159::new(config)?;
+            let mut display = paperwave::InkyUc8159::new(config)?;
             display.set_rotation(rotation);
             Ok(Box::new(display))
         }
         None => {
-            let mut config = inkwell::InkyUc8159Config::default();
+            let mut config = paperwave::InkyUc8159Config::default();
             config.rotation = rotation;
-            let mut display = inkwell::InkyUc8159::new(config)?;
+            let mut display = paperwave::InkyUc8159::new(config)?;
             display.set_rotation(rotation);
             Ok(Box::new(display))
         }
@@ -180,18 +180,18 @@ fn create_display(
 #[cfg(target_os = "linux")]
 fn run_image(
     path: &PathBuf,
-    rotation: inkwell::Rotation,
+    rotation: paperwave::Rotation,
     saturation: f32,
-    probe: &inkwell::ProbeInfo,
-) -> inkwell::Result<()> {
+    probe: &paperwave::ProbeInfo,
+) -> paperwave::Result<()> {
     let mut display = create_display(rotation, probe)?;
     display.set_image_from_path(path.as_path(), saturation)?;
     display.show()
 }
 
 #[cfg(target_os = "linux")]
-fn print_probe(probe: &inkwell::ProbeInfo) {
-    use inkwell::I2cProbeStatus;
+fn print_probe(probe: &paperwave::ProbeInfo) {
+    use paperwave::I2cProbeStatus;
     use std::fmt::Write as _;
 
     println!("== Probe Report ==");

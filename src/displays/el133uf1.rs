@@ -129,23 +129,23 @@ impl InkyEl133Uf1 {
     pub fn new(config: InkyEl133Uf1Config) -> Result<Self> {
         let mut chip = Chip::new(&config.gpio_chip)?;
 
-        let cs0 =
-            chip.get_line(config.pins.cs0)?
-                .request(LineRequestFlags::OUTPUT, 1, "inkwell-cs0")?;
-        let cs1 =
-            chip.get_line(config.pins.cs1)?
-                .request(LineRequestFlags::OUTPUT, 1, "inkwell-cs1")?;
-        let dc =
-            chip.get_line(config.pins.dc)?
-                .request(LineRequestFlags::OUTPUT, 0, "inkwell-dc")?;
+        let cs0 = chip
+            .get_line(config.pins.cs0)?
+            .request(LineRequestFlags::OUTPUT, 1, "paperwave-cs0")?;
+        let cs1 = chip
+            .get_line(config.pins.cs1)?
+            .request(LineRequestFlags::OUTPUT, 1, "paperwave-cs1")?;
+        let dc = chip
+            .get_line(config.pins.dc)?
+            .request(LineRequestFlags::OUTPUT, 0, "paperwave-dc")?;
         let reset = chip.get_line(config.pins.reset)?.request(
             LineRequestFlags::OUTPUT,
             1,
-            "inkwell-reset",
+            "paperwave-reset",
         )?;
         let busy =
             chip.get_line(config.pins.busy)?
-                .request(LineRequestFlags::INPUT, 1, "inkwell-busy")?;
+                .request(LineRequestFlags::INPUT, 1, "paperwave-busy")?;
 
         drop(chip);
 

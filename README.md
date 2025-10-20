@@ -1,6 +1,6 @@
-# Inkwell
+# Paperwave
 
-Inkwell is a Rust CLI for working with Inky e-paper displays. It can probe the
+Paperwave is a Rust CLI for working with Inky e-paper displays. It can probe the
 attached hardware, render demo patterns, and show images with palette-aware
 resizing, rotation, and dithering.
 
@@ -28,10 +28,10 @@ Example commands:
 
 ```sh
 # Probe the system without updating the display
-inkwell --detect-only --debug
+paperwave --detect-only --debug
 
 # Display an image with custom rotation and saturation
-inkwell --rotate 90 --saturation 0.6 path/to/image.png
+paperwave --rotate 90 --saturation 0.6 path/to/image.png
 ```
 
 ## Command-Line Reference
@@ -39,7 +39,7 @@ inkwell --rotate 90 --saturation 0.6 path/to/image.png
 ```
 CLI tool to display images on Inky displays
 
-Usage: inkwell [OPTIONS] [IMAGE]
+Usage: paperwave [OPTIONS] [IMAGE]
 
 Arguments:
   [IMAGE]  Optional PNG to display
