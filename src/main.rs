@@ -4,7 +4,10 @@ use image::{DynamicImage, Rgb, RgbImage};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "inkwell", about = "UC8159 demo utility")]
+#[command(
+    name = "inkwell",
+    about = "CLI tool to display images on Inky displays"
+)]
 struct Args {
     /// Optional PNG to display
     #[arg(value_name = "IMAGE")]
@@ -81,7 +84,7 @@ fn main() {
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("UC8159 demo can only run on Linux targets.");
+    eprintln!("Inky display CLI can only run on Linux targets.");
 }
 
 #[cfg(target_os = "linux")]
