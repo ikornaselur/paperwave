@@ -10,3 +10,4 @@ image = { version = "0.25.5", default-features = false, features = ["png"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 gpio-cdev = "0.6.0"
 spidev = "0.7.0"
+i2cdev = "0.6.1"
