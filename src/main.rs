@@ -68,7 +68,7 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn run_demo(rotation: inkwell::Rotation, saturation: f32) -> inkwell::uc8159::Result<()> {
+fn run_demo(rotation: inkwell::Rotation, saturation: f32) -> inkwell::Uc8159Result<()> {
     use inkwell::{InkyUc8159, InkyUc8159Config};
 
     let mut config = InkyUc8159Config::default();
@@ -116,7 +116,7 @@ fn run_image(
     path: &PathBuf,
     rotation: inkwell::Rotation,
     saturation: f32,
-) -> inkwell::uc8159::Result<()> {
+) -> inkwell::Uc8159Result<()> {
     use inkwell::{InkyUc8159, InkyUc8159Config};
 
     let mut config = InkyUc8159Config::default();
