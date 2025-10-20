@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gpio_cdev::{Chip, LineHandle, LineRequestFlags};
+use image::imageops::{self, FilterType};
 use image::{DynamicImage, GenericImageView, RgbImage};
 use spidev::{SpiModeFlags, Spidev, SpidevOptions};
 
@@ -43,6 +44,14 @@ const SATURATED_PALETTE: [[u8; 3]; 7] = [
     [208, 190, 71],
     [177, 106, 73],
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rotation {
+    Deg0,
+    Deg90,
+    Deg180,
+    Deg270,
+}
 
 #[derive(Debug)]
 pub enum InkyError {
@@ -98,6 +107,24 @@ impl From<image::ImageError> for InkyError {
 
 pub type Result<T> = std::result::Result<T, InkyError>;
 
+impl Rotation {
+    fn target_dimensions(self, width: u16, height: u16) -> (u16, u16) {
+        match self {
+            Rotation::Deg0 | Rotation::Deg180 => (width, height),
+            Rotation::Deg90 | Rotation::Deg270 => (height, width),
+        }
+    }
+
+    fn apply(self, image: RgbImage) -> RgbImage {
+        match self {
+            Rotation::Deg0 => image,
+            Rotation::Deg90 => imageops::rotate90(&image),
+            Rotation::Deg180 => imageops::rotate180(&image),
+            Rotation::Deg270 => imageops::rotate270(&image),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Pins {
     pub cs: u32,
@@ -124,6 +151,7 @@ pub struct InkyUc8159Config {
     pub gpio_chip: String,
     pub pins: Pins,
     pub border_colour: u8,
+    pub rotation: Rotation,
 }
 
 impl Default for InkyUc8159Config {
@@ -135,6 +163,7 @@ impl Default for InkyUc8159Config {
             gpio_chip: "/dev/gpiochip0".to_string(),
             pins: Pins::default(),
             border_colour: 1,
+            rotation: Rotation::Deg0,
         }
     }
 }
@@ -151,6 +180,7 @@ pub struct InkyUc8159 {
     buffer: Vec<u8>,
     border_colour: u8,
     initialised: bool,
+    rotation: Rotation,
 }
 
 impl InkyUc8159 {
@@ -207,6 +237,7 @@ impl InkyUc8159 {
             buffer,
             border_colour: config.border_colour & 0x07,
             initialised: false,
+            rotation: config.rotation,
         })
     }
 
@@ -216,6 +247,18 @@ impl InkyUc8159 {
 
     pub fn height(&self) -> u16 {
         self.height
+    }
+
+    pub fn rotation(&self) -> Rotation {
+        self.rotation
+    }
+
+    pub fn set_rotation(&mut self, rotation: Rotation) {
+        self.rotation = rotation;
+    }
+
+    pub fn input_dimensions(&self) -> (u16, u16) {
+        self.rotation.target_dimensions(self.width, self.height)
     }
 
     pub fn buffer(&self) -> &[u8] {
@@ -232,10 +275,12 @@ impl InkyUc8159 {
     }
 
     pub fn set_pixel(&mut self, x: usize, y: usize, colour: u8) {
-        if x >= self.width as usize || y >= self.height as usize {
+        let (logical_w, logical_h) = self.logical_dimensions_usize();
+        if x >= logical_w || y >= logical_h {
             return;
         }
-        let index = y * self.width as usize + x;
+
+        let index = self.logical_to_physical_index(x, y);
         self.buffer[index] = colour & 0x07;
     }
 
@@ -261,15 +306,20 @@ impl InkyUc8159 {
     }
 
     pub fn set_buffer(&mut self, data: &[u8]) -> Result<()> {
-        let expected = self.buffer.len();
+        let (logical_w, logical_h) = self.logical_dimensions_usize();
+        let expected = logical_w * logical_h;
         if data.len() != expected {
             return Err(InkyError::InvalidBufferSize {
                 expected,
                 received: data.len(),
             });
         }
-        for (dst, src) in self.buffer.iter_mut().zip(data.iter()) {
-            *dst = src & 0x07;
+
+        for (idx, &value) in data.iter().enumerate() {
+            let x = idx % logical_w;
+            let y = idx / logical_w;
+            let physical_index = self.logical_to_physical_index(x, y);
+            self.buffer[physical_index] = value & 0x07;
         }
         Ok(())
     }
@@ -396,34 +446,37 @@ impl InkyUc8159 {
     }
 
     fn prepare_image(&self, image: &DynamicImage) -> RgbImage {
-        let target_w = self.width as u32;
-        let target_h = self.height as u32;
+        let (target_w, target_h) = self.input_dimensions();
+        let target_w = target_w as u32;
+        let target_h = target_h as u32;
 
         let (src_w, src_h) = image.dimensions();
-        if src_w == target_w && src_h == target_h {
-            return image.to_rgb8();
-        }
 
-        let src_ratio = src_w as f32 / src_h as f32;
-        let target_ratio = target_w as f32 / target_h as f32;
-
-        let crop_image: DynamicImage = if (src_ratio - target_ratio).abs() < 1e-6 {
-            image.clone()
-        } else if src_ratio > target_ratio {
-            // source wider than target: crop width
-            let desired_width = ((target_ratio * src_h as f32).round() as u32).clamp(1, src_w);
-            let x = (src_w - desired_width) / 2;
-            image.crop_imm(x, 0, desired_width, src_h)
+        let prepared = if src_w == target_w && src_h == target_h {
+            image.to_rgb8()
         } else {
-            // source taller than target: crop height
-            let desired_height = ((src_w as f32 / target_ratio).round() as u32).clamp(1, src_h);
-            let y = (src_h - desired_height) / 2;
-            image.crop_imm(0, y, src_w, desired_height)
+            let src_ratio = src_w as f32 / src_h as f32;
+            let target_ratio = target_w as f32 / target_h as f32;
+
+            let crop_image: DynamicImage = if (src_ratio - target_ratio).abs() < 1e-6 {
+                image.clone()
+            } else if src_ratio > target_ratio {
+                // source wider than target: crop width
+                let desired_width = ((target_ratio * src_h as f32).round() as u32).clamp(1, src_w);
+                let x = (src_w - desired_width) / 2;
+                image.crop_imm(x, 0, desired_width, src_h)
+            } else {
+                // source taller than target: crop height
+                let desired_height = ((src_w as f32 / target_ratio).round() as u32).clamp(1, src_h);
+                let y = (src_h - desired_height) / 2;
+                image.crop_imm(0, y, src_w, desired_height)
+            };
+
+            let resized = crop_image.resize_exact(target_w, target_h, FilterType::Triangle);
+            resized.to_rgb8()
         };
 
-        let resized =
-            crop_image.resize_exact(target_w, target_h, image::imageops::FilterType::Triangle);
-        resized.to_rgb8()
+        self.rotation.apply(prepared)
     }
 
     fn quantize_into_buffer(&mut self, rgb: &RgbImage, palette: &[[f32; 3]; 7]) {
@@ -450,6 +503,25 @@ impl InkyUc8159 {
                 distribute_error(&mut working, width, height, x, y, error);
             }
         }
+    }
+
+    fn logical_dimensions_usize(&self) -> (usize, usize) {
+        let (w, h) = self.input_dimensions();
+        (w as usize, h as usize)
+    }
+
+    fn logical_to_physical_index(&self, x: usize, y: usize) -> usize {
+        let (px, py) = match self.rotation {
+            Rotation::Deg0 => (x, y),
+            Rotation::Deg90 => ((self.width as usize - 1) - y, x),
+            Rotation::Deg180 => (
+                (self.width as usize - 1) - x,
+                (self.height as usize - 1) - y,
+            ),
+            Rotation::Deg270 => (y, (self.height as usize - 1) - x),
+        };
+
+        py * self.width as usize + px
     }
 }
 
