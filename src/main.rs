@@ -89,21 +89,31 @@ fn run_demo(
     rotation: inkwell::Rotation,
     saturation: f32,
     probe: &inkwell::ProbeInfo,
-) -> inkwell::Uc8159Result<()> {
+) -> inkwell::Result<()> {
     let mut display = create_display(rotation, probe)?;
 
     let (input_w, input_h) = display.input_dimensions();
     let mut image = RgbImage::new(input_w as u32, input_h as u32);
 
-    let palette = [
-        Rgb([57, 48, 57]),
-        Rgb([255, 255, 255]),
-        Rgb([58, 91, 70]),
-        Rgb([61, 59, 94]),
-        Rgb([156, 72, 75]),
-        Rgb([208, 190, 71]),
-        Rgb([177, 106, 73]),
-    ];
+    let palette: Vec<Rgb<u8>> = match probe.display {
+        Some(inkwell::DisplaySpec::El133Uf1 { .. }) => vec![
+            Rgb([0, 0, 0]),
+            Rgb([255, 255, 255]),
+            Rgb([255, 255, 0]),
+            Rgb([255, 0, 0]),
+            Rgb([0, 0, 255]),
+            Rgb([0, 255, 0]),
+        ],
+        _ => vec![
+            Rgb([57, 48, 57]),
+            Rgb([255, 255, 255]),
+            Rgb([58, 91, 70]),
+            Rgb([61, 59, 94]),
+            Rgb([156, 72, 75]),
+            Rgb([208, 190, 71]),
+            Rgb([177, 106, 73]),
+        ],
+    };
 
     let stripes = palette.len();
     let stripe_height = ((input_h as usize) + stripes - 1) / stripes;
@@ -132,16 +142,36 @@ fn run_demo(
 fn create_display(
     rotation: inkwell::Rotation,
     probe: &inkwell::ProbeInfo,
-) -> inkwell::Uc8159Result<inkwell::InkyUc8159> {
-    use inkwell::InkyUc8159Config;
+) -> inkwell::Result<Box<dyn inkwell::InkyDisplay>> {
+    use inkwell::InkyDisplay;
 
-    let mut config = InkyUc8159Config::default();
-    if let Some((width, height)) = inkwell::uc8159_resolution_from_probe(probe) {
-        config.width = width;
-        config.height = height;
+    match probe.display {
+        Some(inkwell::DisplaySpec::El133Uf1 { width, height }) => {
+            let mut config = inkwell::InkyEl133Uf1Config::default();
+            config.width = width;
+            config.height = height;
+            config.rotation = rotation;
+            let mut display = inkwell::InkyEl133Uf1::new(config)?;
+            display.set_rotation(rotation);
+            Ok(Box::new(display))
+        }
+        Some(inkwell::DisplaySpec::Uc8159 { width, height, .. }) => {
+            let mut config = inkwell::InkyUc8159Config::default();
+            config.width = width;
+            config.height = height;
+            config.rotation = rotation;
+            let mut display = inkwell::InkyUc8159::new(config)?;
+            display.set_rotation(rotation);
+            Ok(Box::new(display))
+        }
+        None => {
+            let mut config = inkwell::InkyUc8159Config::default();
+            config.rotation = rotation;
+            let mut display = inkwell::InkyUc8159::new(config)?;
+            display.set_rotation(rotation);
+            Ok(Box::new(display))
+        }
     }
-    config.rotation = rotation;
-    inkwell::InkyUc8159::new(config)
 }
 
 #[cfg(target_os = "linux")]
@@ -150,9 +180,9 @@ fn run_image(
     rotation: inkwell::Rotation,
     saturation: f32,
     probe: &inkwell::ProbeInfo,
-) -> inkwell::Uc8159Result<()> {
+) -> inkwell::Result<()> {
     let mut display = create_display(rotation, probe)?;
-    display.set_image_from_path(path, saturation)?;
+    display.set_image_from_path(path.as_path(), saturation)?;
     display.show()
 }
 
@@ -174,7 +204,7 @@ fn print_probe(probe: &inkwell::ProbeInfo) {
         (None, None) => println!("EEPROM: not found"),
     }
 
-    if let Some(spec) = &probe.uc8159 {
+    if let Some(spec) = &probe.display {
         println!("Display: {spec}");
     } else {
         println!("Display: not detected (fallback to 600x448)");

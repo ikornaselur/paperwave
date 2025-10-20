@@ -70,17 +70,21 @@ impl EepromInfo {
             .unwrap_or("Unknown")
     }
 
-    pub fn uc8159_spec(&self) -> Option<Uc8159Spec> {
+    pub fn display_spec(&self) -> Option<DisplaySpec> {
         match self.display_variant {
-            14 => Some(Uc8159Spec {
+            14 => Some(DisplaySpec::Uc8159 {
                 width: 600,
                 height: 448,
-                display_variant: self.display_variant,
+                variant: self.display_variant,
             }),
-            16 => Some(Uc8159Spec {
+            16 => Some(DisplaySpec::Uc8159 {
                 width: 640,
                 height: 400,
-                display_variant: self.display_variant,
+                variant: self.display_variant,
+            }),
+            21 => Some(DisplaySpec::El133Uf1 {
+                width: self.width,
+                height: self.height,
             }),
             _ => None,
         }
@@ -88,19 +92,30 @@ impl EepromInfo {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Uc8159Spec {
-    pub width: u16,
-    pub height: u16,
-    pub display_variant: u8,
+pub enum DisplaySpec {
+    Uc8159 {
+        width: u16,
+        height: u16,
+        variant: u8,
+    },
+    El133Uf1 {
+        width: u16,
+        height: u16,
+    },
 }
 
-impl fmt::Display for Uc8159Spec {
+impl fmt::Display for DisplaySpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "UC8159 variant {} ({}x{})",
-            self.display_variant, self.width, self.height
-        )
+        match self {
+            DisplaySpec::Uc8159 {
+                width,
+                height,
+                variant,
+            } => write!(f, "UC8159 variant {} ({}x{})", variant, width, height),
+            DisplaySpec::El133Uf1 { width, height } => {
+                write!(f, "Spectra 6 EL133UF1 ({}x{})", width, height)
+            }
+        }
     }
 }
 
@@ -123,7 +138,7 @@ pub enum I2cProbeStatus {
 pub struct ProbeInfo {
     pub eeprom: Option<EepromInfo>,
     pub eeprom_error: Option<String>,
-    pub uc8159: Option<Uc8159Spec>,
+    pub display: Option<DisplaySpec>,
     pub eeprom_bus: Option<PathBuf>,
     pub spi_devices: Vec<PathBuf>,
     pub gpio_chips: Vec<PathBuf>,
@@ -150,7 +165,7 @@ pub fn probe_system() -> ProbeInfo {
         match status {
             I2cProbeStatus::Found(eeprom) => {
                 if info.eeprom.is_none() {
-                    info.uc8159 = eeprom.uc8159_spec();
+                    info.display = eeprom.display_spec();
                     info.eeprom = Some(eeprom);
                     info.eeprom_bus = Some(bus.clone());
                     info.eeprom_error = None;
@@ -264,7 +279,10 @@ fn map_i2c_error(err: LinuxI2CError) -> I2cProbeStatus {
 }
 
 pub fn uc8159_resolution_from_probe(probe: &ProbeInfo) -> Option<(u16, u16)> {
-    probe.uc8159.map(|spec| (spec.width, spec.height))
+    match probe.display {
+        Some(DisplaySpec::Uc8159 { width, height, .. }) => Some((width, height)),
+        _ => None,
+    }
 }
 
 fn handle_i2c_open_error(err: LinuxI2CError) -> I2cProbeStatus {

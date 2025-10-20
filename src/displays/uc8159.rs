@@ -1,12 +1,17 @@
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gpio_cdev::{Chip, LineHandle, LineRequestFlags};
-use image::imageops::{self, FilterType};
 use image::{DynamicImage, GenericImageView, RgbImage};
 use spidev::{SpiModeFlags, Spidev, SpidevOptions};
+
+use super::common::{
+    InkyDisplay, Rotation, clamp_aspect_resize, distribute_error, nearest_colour,
+    pack_buffer_nibbles,
+};
+use super::error::{InkyError, Result};
 
 const UC8159_PSR: u8 = 0x00;
 const UC8159_PWR: u8 = 0x01;
@@ -44,86 +49,6 @@ const SATURATED_PALETTE: [[u8; 3]; 7] = [
     [208, 190, 71],
     [177, 106, 73],
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Rotation {
-    Deg0,
-    Deg90,
-    Deg180,
-    Deg270,
-}
-
-#[derive(Debug)]
-pub enum InkyError {
-    Io(io::Error),
-    Gpio(gpio_cdev::errors::Error),
-    Timeout(&'static str, Duration),
-    InvalidBufferSize { expected: usize, received: usize },
-    UnsupportedResolution(u16, u16),
-    Image(image::ImageError),
-}
-
-impl std::fmt::Display for InkyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            InkyError::Io(err) => write!(f, "IO error: {err}"),
-            InkyError::Gpio(err) => write!(f, "GPIO error: {err}"),
-            InkyError::Timeout(context, duration) => {
-                write!(f, "Timed out waiting for {context} after {:?}", duration)
-            }
-            InkyError::InvalidBufferSize { expected, received } => {
-                write!(
-                    f,
-                    "Invalid buffer size: expected {expected}, got {received}"
-                )
-            }
-            InkyError::UnsupportedResolution(w, h) => {
-                write!(f, "Unsupported resolution {w}x{h}")
-            }
-            InkyError::Image(err) => write!(f, "Image error: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for InkyError {}
-
-impl From<io::Error> for InkyError {
-    fn from(err: io::Error) -> Self {
-        InkyError::Io(err)
-    }
-}
-
-impl From<gpio_cdev::errors::Error> for InkyError {
-    fn from(err: gpio_cdev::errors::Error) -> Self {
-        InkyError::Gpio(err)
-    }
-}
-
-impl From<image::ImageError> for InkyError {
-    fn from(err: image::ImageError) -> Self {
-        InkyError::Image(err)
-    }
-}
-
-pub type Result<T> = std::result::Result<T, InkyError>;
-
-impl Rotation {
-    fn target_dimensions(self, width: u16, height: u16) -> (u16, u16) {
-        match self {
-            Rotation::Deg0 | Rotation::Deg180 => (width, height),
-            Rotation::Deg90 | Rotation::Deg270 => (height, width),
-        }
-    }
-
-    fn apply(self, image: RgbImage) -> RgbImage {
-        match self {
-            Rotation::Deg0 => image,
-            Rotation::Deg90 => imageops::rotate90(&image),
-            Rotation::Deg180 => imageops::rotate180(&image),
-            Rotation::Deg270 => imageops::rotate270(&image),
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 pub struct Pins {
@@ -190,17 +115,14 @@ impl InkyUc8159 {
         let cs =
             chip.get_line(config.pins.cs)?
                 .request(LineRequestFlags::OUTPUT, 1, "inkwell-cs")?;
-
         let dc =
             chip.get_line(config.pins.dc)?
                 .request(LineRequestFlags::OUTPUT, 0, "inkwell-dc")?;
-
         let reset = chip.get_line(config.pins.reset)?.request(
             LineRequestFlags::OUTPUT,
             1,
             "inkwell-reset",
         )?;
-
         let busy =
             chip.get_line(config.pins.busy)?
                 .request(LineRequestFlags::INPUT, 0, "inkwell-busy")?;
@@ -218,8 +140,11 @@ impl InkyUc8159 {
         let resolution_setting = match (config.width, config.height) {
             (600, 448) => 0b11,
             (640, 400) => 0b10,
-            other => {
-                return Err(InkyError::UnsupportedResolution(other.0, other.1));
+            _ => {
+                return Err(InkyError::UnsupportedResolution(
+                    config.width,
+                    config.height,
+                ));
             }
         };
 
@@ -284,7 +209,7 @@ impl InkyUc8159 {
         self.buffer[index] = colour & 0x07;
     }
 
-    pub fn set_image_from_path<P: AsRef<Path>>(&mut self, path: P, saturation: f32) -> Result<()> {
+    pub fn set_image_from_path(&mut self, path: &Path, saturation: f32) -> Result<()> {
         let image = image::open(path)?;
         self.set_image(&image, saturation)
     }
@@ -330,7 +255,7 @@ impl InkyUc8159 {
             self.initialised = true;
         }
 
-        let packed = self.pack_buffer();
+        let packed = pack_buffer_nibbles(&self.buffer);
         self.send_command_data(UC8159_DTM1, &packed)?;
 
         self.send_command(UC8159_PON)?;
@@ -434,46 +359,15 @@ impl InkyUc8159 {
         Ok(())
     }
 
-    fn pack_buffer(&self) -> Vec<u8> {
-        let mut packed = Vec::with_capacity((self.buffer.len() + 1) / 2);
-        let mut iter = self.buffer.iter();
-        while let Some(&high) = iter.next() {
-            let low = iter.next().copied().unwrap_or(0);
-            let byte = ((high & 0x0F) << 4) | (low & 0x0F);
-            packed.push(byte);
-        }
-        packed
-    }
-
     fn prepare_image(&self, image: &DynamicImage) -> RgbImage {
         let (target_w, target_h) = self.input_dimensions();
         let target_w = target_w as u32;
         let target_h = target_h as u32;
 
-        let (src_w, src_h) = image.dimensions();
-
-        let prepared = if src_w == target_w && src_h == target_h {
+        let prepared = if image.dimensions() == (target_w, target_h) {
             image.to_rgb8()
         } else {
-            let src_ratio = src_w as f32 / src_h as f32;
-            let target_ratio = target_w as f32 / target_h as f32;
-
-            let crop_image: DynamicImage = if (src_ratio - target_ratio).abs() < 1e-6 {
-                image.clone()
-            } else if src_ratio > target_ratio {
-                // source wider than target: crop width
-                let desired_width = ((target_ratio * src_h as f32).round() as u32).clamp(1, src_w);
-                let x = (src_w - desired_width) / 2;
-                image.crop_imm(x, 0, desired_width, src_h)
-            } else {
-                // source taller than target: crop height
-                let desired_height = ((src_w as f32 / target_ratio).round() as u32).clamp(1, src_h);
-                let y = (src_h - desired_height) / 2;
-                image.crop_imm(0, y, src_w, desired_height)
-            };
-
-            let resized = crop_image.resize_exact(target_w, target_h, FilterType::Triangle);
-            resized.to_rgb8()
+            clamp_aspect_resize(image, target_w, target_h)
         };
 
         self.rotation.apply(prepared)
@@ -538,52 +432,40 @@ fn build_palette(saturation: f32) -> [[f32; 3]; 7] {
     palette
 }
 
-fn nearest_colour(palette: &[[f32; 3]; 7], colour: [f32; 3]) -> (usize, [f32; 3]) {
-    let mut best_index = 0usize;
-    let mut best_distance = f32::MAX;
-    for (idx, candidate) in palette.iter().enumerate() {
-        let dr = colour[0] - candidate[0];
-        let dg = colour[1] - candidate[1];
-        let db = colour[2] - candidate[2];
-        let distance = dr * dr + dg * dg + db * db;
-        if distance < best_distance {
-            best_distance = distance;
-            best_index = idx;
-        }
+impl InkyDisplay for InkyUc8159 {
+    fn width(&self) -> u16 {
+        self.width
     }
 
-    (best_index, palette[best_index])
-}
+    fn height(&self) -> u16 {
+        self.height
+    }
 
-fn distribute_error(
-    working: &mut [[f32; 3]],
-    width: usize,
-    height: usize,
-    x: usize,
-    y: usize,
-    error: [f32; 3],
-) {
-    let width_usize = width;
-    let height_usize = height;
+    fn set_rotation(&mut self, rotation: Rotation) {
+        InkyUc8159::set_rotation(self, rotation);
+    }
 
-    let mut apply = |nx: isize, ny: isize, factor: f32| {
-        if nx < 0 || ny < 0 {
-            return;
-        }
-        let nx = nx as usize;
-        let ny = ny as usize;
-        if nx >= width_usize || ny >= height_usize {
-            return;
-        }
-        let idx = ny * width_usize + nx;
-        for channel in 0..3 {
-            let value = working[idx][channel] + error[channel] * factor;
-            working[idx][channel] = value.clamp(0.0, 255.0);
-        }
-    };
+    fn input_dimensions(&self) -> (u16, u16) {
+        InkyUc8159::input_dimensions(self)
+    }
 
-    apply((x as isize) + 1, y as isize, 7.0 / 16.0);
-    apply((x as isize) - 1, (y as isize) + 1, 3.0 / 16.0);
-    apply(x as isize, (y as isize) + 1, 5.0 / 16.0);
-    apply((x as isize) + 1, (y as isize) + 1, 1.0 / 16.0);
+    fn clear(&mut self, colour: u8) {
+        InkyUc8159::clear(self, colour)
+    }
+
+    fn set_pixel(&mut self, x: usize, y: usize, colour: u8) {
+        InkyUc8159::set_pixel(self, x, y, colour)
+    }
+
+    fn set_image_from_path(&mut self, path: &Path, saturation: f32) -> Result<()> {
+        InkyUc8159::set_image_from_path(self, path, saturation)
+    }
+
+    fn set_image(&mut self, image: &DynamicImage, saturation: f32) -> Result<()> {
+        InkyUc8159::set_image(self, image, saturation)
+    }
+
+    fn show(&mut self) -> Result<()> {
+        InkyUc8159::show(self)
+    }
 }
