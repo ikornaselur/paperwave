@@ -153,7 +153,7 @@ impl InkyEl133Uf1 {
         let options = SpidevOptions::new()
             .bits_per_word(8)
             .max_speed_hz(10_000_000)
-            .mode(SpiModeFlags::SPI_MODE_0)
+            .mode(SpiModeFlags::SPI_MODE_0 | SpiModeFlags::SPI_NO_CS)
             .build();
         spi.configure(&options)?;
 
@@ -270,6 +270,12 @@ impl InkyEl133Uf1 {
 
     fn busy_wait(&mut self, timeout: Duration) -> Result<()> {
         let start = Instant::now();
+        // Fallback behavior: if BUSY reads high, assume no signal and sleep out the timeout
+        let busy_val = self.busy.get_value()?;
+        if busy_val != 0 {
+            thread::sleep(timeout);
+            return Ok(());
+        }
         while start.elapsed() < timeout {
             if self.busy.get_value()? == 0 {
                 return Ok(());
@@ -288,6 +294,8 @@ impl InkyEl133Uf1 {
         }
 
         self.dc.set_value(0)?;
+        // Match Python driver behavior: settle before command
+        thread::sleep(Duration::from_millis(300));
         self.spi.write(&[command])?;
 
         if !data.is_empty() {
