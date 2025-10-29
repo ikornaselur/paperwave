@@ -22,7 +22,7 @@ resizing, rotation, and dithering.
 1. Build the project with `cargo build --release`.
 2. Run the binary on a system with access to the required SPI, GPIO, and I2C
    interfaces.
-3. Supply a PNG to render or use the built-in demo stripes.
+3. Supply an image (PNG or JPEG) to render or use the built-in demo stripes.
 
 Example commands:
 
@@ -31,7 +31,7 @@ Example commands:
 paperwave --detect-only --debug
 
 # Display an image with custom rotation and saturation
-paperwave --rotate 90 --saturation 0.6 path/to/image.png
+paperwave --rotate 90 --saturation 0.6 path/to/image.jpg
 ```
 
 ## Command-Line Reference
@@ -51,3 +51,16 @@ Options:
       --debug              Print probe/debug information before running
   -h, --help               Print help
 ```
+
+### Web Server
+
+On Linux targets, you can run a simple web server to upload an image from a browser:
+
+```
+paperwave web [--host 0.0.0.0] [--port 8080]
+```
+
+- Serves a drag‑and‑drop page at `/` showing the detected panel resolution and aspect ratio.
+- Submissions are blocked while an update is in progress.
+- Accepts PNG and JPEG uploads. First iteration applies default saturation (0.5) and lighten (0.0).
+- Logs requests and server events via `tracing`; control verbosity with `RUST_LOG` (e.g., `RUST_LOG=debug paperwave web`).

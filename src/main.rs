@@ -1,7 +1,10 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(target_os = "linux")]
 use image::{DynamicImage, Rgb, RgbImage};
 use std::path::PathBuf;
+
+#[cfg(target_os = "linux")]
+mod web;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -9,6 +12,10 @@ use std::path::PathBuf;
     about = "CLI tool to display images on Inky displays"
 )]
 struct Args {
+    /// Subcommands (e.g., `web`)
+    #[command(subcommand)]
+    cmd: Option<Command>,
+
     /// Optional PNG to display
     #[arg(value_name = "IMAGE")]
     image: Option<PathBuf>,
@@ -32,6 +39,20 @@ struct Args {
     /// Print probe/debug information before running
     #[arg(long)]
     debug: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the web server for uploading images
+    #[cfg(target_os = "linux")]
+    Web {
+        /// Bind host (default: 0.0.0.0)
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+        /// Bind port (default: 8080)
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -61,6 +82,15 @@ impl From<RotationArg> for paperwave::Rotation {
 #[cfg(target_os = "linux")]
 fn main() {
     let args = Args::parse();
+    #[cfg(target_os = "linux")]
+    if let Some(Command::Web { host, port }) = &args.cmd {
+        if let Err(err) = run_web(host, *port) {
+            eprintln!("Error: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let rotation = args.rotation.into();
     let probe = paperwave::probe_system();
 
@@ -89,6 +119,13 @@ fn main() {
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("Inky display CLI can only run on Linux targets.");
+}
+
+#[cfg(target_os = "linux")]
+fn run_web(host: &str, port: u16) -> paperwave::Result<()> {
+    // Perform hardware probe once and launch async server with that context
+    let probe = paperwave::probe_system();
+    web::run_server(host.to_string(), port, probe)
 }
 
 #[cfg(target_os = "linux")]
