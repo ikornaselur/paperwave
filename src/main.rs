@@ -17,6 +17,10 @@ struct Args {
     #[arg(short, long, value_name = "SAT", default_value_t = 0.5)]
     saturation: f32,
 
+    /// Lighten image before quantization (0.0 = none, 1.0 = strongest)
+    #[arg(short = 'l', long, value_name = "LIGHTEN", default_value_t = 0.0)]
+    lighten: f32,
+
     /// Rotate image before display (degrees clockwise)
     #[arg(short, long = "rotate", value_enum, default_value_t = RotationArg::Deg0)]
     rotation: RotationArg,
@@ -69,14 +73,14 @@ fn main() {
     }
 
     if let Some(path) = args.image {
-        if let Err(err) = run_image(&path, rotation, args.saturation, &probe) {
+        if let Err(err) = run_image(&path, rotation, args.saturation, args.lighten, &probe) {
             eprintln!("Error: {err}");
             std::process::exit(1);
         }
         return;
     }
 
-    if let Err(err) = run_demo(rotation, args.saturation, &probe) {
+    if let Err(err) = run_demo(rotation, args.saturation, args.lighten, &probe) {
         eprintln!("Error: {err}");
         std::process::exit(1);
     }
@@ -91,6 +95,7 @@ fn main() {
 fn run_demo(
     rotation: paperwave::Rotation,
     saturation: f32,
+    lighten: f32,
     probe: &paperwave::ProbeInfo,
 ) -> paperwave::Result<()> {
     let mut display = create_display(rotation, probe)?;
@@ -137,7 +142,7 @@ fn run_demo(
     }
 
     let dynamic = DynamicImage::ImageRgb8(image);
-    display.set_image(&dynamic, saturation)?;
+    display.set_image(&dynamic, saturation, lighten)?;
     display.show()
 }
 
@@ -182,10 +187,11 @@ fn run_image(
     path: &PathBuf,
     rotation: paperwave::Rotation,
     saturation: f32,
+    lighten: f32,
     probe: &paperwave::ProbeInfo,
 ) -> paperwave::Result<()> {
     let mut display = create_display(rotation, probe)?;
-    display.set_image_from_path(path.as_path(), saturation)?;
+    display.set_image_from_path(path.as_path(), saturation, lighten)?;
     display.show()
 }
 

@@ -8,8 +8,8 @@ use image::{DynamicImage, GenericImageView, RgbImage};
 use spidev::{SpiModeFlags, Spidev, SpidevOptions};
 
 use super::common::{
-    InkyDisplay, Rotation, clamp_aspect_resize, distribute_error, nearest_colour,
-    pack_buffer_nibbles,
+    InkyDisplay, Rotation, clamp_aspect_resize, distribute_error, lighten_image_in_place,
+    nearest_colour, pack_buffer_nibbles,
 };
 use super::error::{InkyError, Result};
 
@@ -209,13 +209,14 @@ impl InkyUc8159 {
         self.buffer[index] = colour & 0x07;
     }
 
-    pub fn set_image_from_path(&mut self, path: &Path, saturation: f32) -> Result<()> {
+    pub fn set_image_from_path(&mut self, path: &Path, saturation: f32, lighten: f32) -> Result<()> {
         let image = image::open(path)?;
-        self.set_image(&image, saturation)
+        self.set_image(&image, saturation, lighten)
     }
 
-    pub fn set_image(&mut self, image: &DynamicImage, saturation: f32) -> Result<()> {
-        let rgb = self.prepare_image(image);
+    pub fn set_image(&mut self, image: &DynamicImage, saturation: f32, lighten: f32) -> Result<()> {
+        let mut rgb = self.prepare_image(image);
+        lighten_image_in_place(&mut rgb, lighten);
         let palette = build_palette(saturation);
         self.quantize_into_buffer(&rgb, &palette);
 
@@ -457,12 +458,12 @@ impl InkyDisplay for InkyUc8159 {
         InkyUc8159::set_pixel(self, x, y, colour)
     }
 
-    fn set_image_from_path(&mut self, path: &Path, saturation: f32) -> Result<()> {
-        InkyUc8159::set_image_from_path(self, path, saturation)
+    fn set_image_from_path(&mut self, path: &Path, saturation: f32, lighten: f32) -> Result<()> {
+        InkyUc8159::set_image_from_path(self, path, saturation, lighten)
     }
 
-    fn set_image(&mut self, image: &DynamicImage, saturation: f32) -> Result<()> {
-        InkyUc8159::set_image(self, image, saturation)
+    fn set_image(&mut self, image: &DynamicImage, saturation: f32, lighten: f32) -> Result<()> {
+        InkyUc8159::set_image(self, image, saturation, lighten)
     }
 
     fn show(&mut self) -> Result<()> {

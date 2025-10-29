@@ -9,7 +9,8 @@ use image::{DynamicImage, GenericImageView, ImageBuffer, RgbImage};
 use spidev::{SpiModeFlags, Spidev, SpidevOptions};
 
 use super::common::{
-    InkyDisplay, Rotation, clamp_aspect_resize, distribute_error, nearest_colour, pack_luma_nibbles,
+    InkyDisplay, Rotation, clamp_aspect_resize, distribute_error, lighten_image_in_place,
+    nearest_colour, pack_luma_nibbles,
 };
 use super::error::{InkyError, Result};
 
@@ -374,13 +375,14 @@ impl InkyDisplay for InkyEl133Uf1 {
         self.buffer[idx] = colour & 0x07;
     }
 
-    fn set_image_from_path(&mut self, path: &Path, saturation: f32) -> Result<()> {
+    fn set_image_from_path(&mut self, path: &Path, saturation: f32, lighten: f32) -> Result<()> {
         let image = image::open(path)?;
-        self.set_image(&image, saturation)
+        self.set_image(&image, saturation, lighten)
     }
 
-    fn set_image(&mut self, image: &DynamicImage, saturation: f32) -> Result<()> {
-        let rgb = self.prepare_image(image);
+    fn set_image(&mut self, image: &DynamicImage, saturation: f32, lighten: f32) -> Result<()> {
+        let mut rgb = self.prepare_image(image);
+        lighten_image_in_place(&mut rgb, lighten);
         let palette = blend_palette(saturation);
         self.quantize_into_buffer(&rgb, &palette);
         Ok(())

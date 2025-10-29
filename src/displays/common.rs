@@ -57,6 +57,23 @@ pub fn clamp_aspect_resize(image: &DynamicImage, target_w: u32, target_h: u32) -
         .to_rgb8()
 }
 
+pub fn lighten_image_in_place(image: &mut RgbImage, lighten: f32) {
+    let l = lighten.clamp(0.0, 1.0);
+    if l <= 0.0 {
+        return;
+    }
+    // Gamma curve: lower gamma (<1.0) lightens the tones.
+    let gamma = 1.0 - 0.5 * l; // l=1.0 -> gamma=0.5; l=0.0 -> gamma=1.0
+    for p in image.pixels_mut() {
+        for c in 0..3 {
+            let v = (p[c] as f32) / 255.0;
+            let nv = v.powf(gamma);
+            let out = (nv * 255.0).round().clamp(0.0, 255.0) as u8;
+            p[c] = out;
+        }
+    }
+}
+
 pub fn pack_luma_nibbles(
     image: &ImageBuffer<image::Luma<u8>, Vec<u8>>,
     start: usize,
@@ -143,7 +160,7 @@ pub trait InkyDisplay {
     fn input_dimensions(&self) -> (u16, u16);
     fn clear(&mut self, colour: u8);
     fn set_pixel(&mut self, x: usize, y: usize, colour: u8);
-    fn set_image_from_path(&mut self, path: &Path, saturation: f32) -> Result<()>;
-    fn set_image(&mut self, image: &DynamicImage, saturation: f32) -> Result<()>;
+    fn set_image_from_path(&mut self, path: &Path, saturation: f32, lighten: f32) -> Result<()>;
+    fn set_image(&mut self, image: &DynamicImage, saturation: f32, lighten: f32) -> Result<()>;
     fn show(&mut self) -> Result<()>;
 }
