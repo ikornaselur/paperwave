@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use image::DynamicImage;
+use image::{imageops, DynamicImage, Rgb, RgbImage};
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,6 +14,9 @@ use paperwave::InkyDisplay;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
+use serde::{Deserialize};
+use std::fs;
+use std::path::PathBuf;
 
 #[derive(Clone)]
 struct AppState {
@@ -22,6 +25,7 @@ struct AppState {
     aspect: f32,
     busy: Arc<Mutex<()>>, // lock while an update is in progress
     probe: Arc<paperwave::ProbeInfo>,
+    rotation_override: Arc<Mutex<Option<paperwave::Rotation>>>,
 }
 
 #[derive(Serialize)]
@@ -36,6 +40,9 @@ struct InfoResponse {
 struct StatusResponse {
     busy: bool,
 }
+
+#[derive(Deserialize)]
+struct CalibrateAnswerReq { direction: String }
 
 pub fn run_server(host: String, port: u16, probe: paperwave::ProbeInfo) -> paperwave::Result<()> {
     // Initialize logging (honors RUST_LOG if present)
@@ -60,6 +67,7 @@ pub fn run_server(host: String, port: u16, probe: paperwave::ProbeInfo) -> paper
         aspect,
         busy: Arc::new(Mutex::new(())),
         probe: Arc::new(probe),
+        rotation_override: Arc::new(Mutex::new(load_saved_rotation())),
     };
 
     let app = Router::new()
@@ -67,6 +75,8 @@ pub fn run_server(host: String, port: u16, probe: paperwave::ProbeInfo) -> paper
         .route("/info", get(info))
         .route("/status", get(status))
         .route("/upload", post(upload))
+        .route("/calibrate/start", post(calibrate_start))
+        .route("/calibrate/answer", post(calibrate_answer))
         .with_state(state)
         // Allow reasonably large images by default (25 MiB)
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
@@ -107,23 +117,45 @@ async fn index(state: axum::extract::State<AppState>) -> impl IntoResponse {
   <style>
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }}
     .info {{ margin-bottom: 1rem; color: #333; }}
-    .dropzone {{ border: 2px dashed #999; border-radius: 8px; padding: 2rem; text-align: center; color: #555; }}
+    .dropzone {{ position: relative; width: min(100%, 560px); aspect-ratio: var(--ar); border: 2px dashed #999; border-radius: 8px; color: #555; background: #fafafa; display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; }}
     .dropzone.dragover {{ border-color: #2a7; color: #2a7; background: #f6fff9; }}
     .controls {{ margin-top: 1rem; }}
     button {{ padding: 0.6rem 1.2rem; font-size: 1rem; }}
     .muted {{ color: #888; font-size: 0.9rem; }}
     #status {{ margin-top: 0.5rem; min-height: 1.2rem; }}
+    #preview {{ width: 100%; height: 100%; object-fit: cover; display: none; }}
+    .placeholder {{ color: #aaa; }}
+    .badge {{ position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.6); color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px; }}
   </style>
 </head>
 <body>
   <div class="info">
     <strong>Detected panel:</strong> {w} × {h} (aspect {aspect:.3})
   </div>
-  <div id="drop" class="dropzone" aria-label="dropzone">
-    <p>Drag & drop an image here, or click to choose</p>
+  <div id="drop" class="dropzone" aria-label="dropzone" style="--ar: {w}/{h}">
+    <div id="badge" class="badge">Aspect {w}:{h} (~{aspect:.3})</div>
+    <span id="placeholder" class="placeholder">Drag & drop an image, or click</span>
+    <img id="preview" alt="preview" />
     <input id="file" type="file" accept="image/*" style="display:none" />
   </div>
   <div class="controls">
+    <div class="muted" style="margin-bottom:0.5rem">Orientation controls rotate the display preview only.</div>
+    <div class="controls-row" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-bottom:0.5rem;">
+      <span class="muted">Orientation:</span>
+      <button id="orient-land" type="button">Landscape</button>
+      <button id="orient-port" type="button">Portrait</button>
+      <button id="orient-flip" type="button">Flip 180°</button>
+    </div>
+    <div id="calib-row1" class="controls-row" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-bottom:0.5rem;">
+      <button id="calib-start" type="button">Calibrate orientation</button>
+    </div>
+    <div id="calib-row2" class="controls-row" style="display:none; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-bottom:0.5rem;">
+      <span class="muted">Arrow points:</span>
+      <button id="calib-up" type="button">Up</button>
+      <button id="calib-right" type="button">Right</button>
+      <button id="calib-down" type="button">Down</button>
+      <button id="calib-left" type="button">Left</button>
+    </div>
     <button id="send" {disabled}>Send to display</button>
     <div id="hint" class="muted">{hint}</div>
     <div id="status"></div>
@@ -133,12 +165,83 @@ async fn index(state: axum::extract::State<AppState>) -> impl IntoResponse {
     const fileInput = document.getElementById('file');
     const sendBtn = document.getElementById('send');
     const statusEl = document.getElementById('status');
+    const previewEl = document.getElementById('preview');
+    const placeholderEl = document.getElementById('placeholder');
+    const badgeEl = document.getElementById('badge');
+    const orientLandBtn = document.getElementById('orient-land');
+    const orientPortBtn = document.getElementById('orient-port');
+    const orientFlipBtn = document.getElementById('orient-flip');
     const hintEl = document.getElementById('hint');
+    const calibStartBtn = document.getElementById('calib-start');
+    const calibRow1 = document.getElementById('calib-row1');
+    const calibRow2 = document.getElementById('calib-row2');
+    const calibUp = document.getElementById('calib-up');
+    const calibRight = document.getElementById('calib-right');
+    const calibDown = document.getElementById('calib-down');
+    const calibLeft = document.getElementById('calib-left');
     let file = null;
+    let previewUrl = null;
+    let orientation = 'landscape';
+    let flipped = false;
+
+    const PANEL_W = {w};
+    const PANEL_H = {h};
+    const ASPECT = {aspect:.6};
+    const DEFAULT_PORTRAIT = {default_portrait};
 
     function setBusy(b) {{
       sendBtn.disabled = b || !file;
       hintEl.textContent = b ? 'Update in progress, please wait…' : (file ? file.name : '');
+    }}
+
+    function showPreview(f) {{
+      if (!f) {{
+        if (previewUrl) {{ URL.revokeObjectURL(previewUrl); previewUrl = null; }}
+        previewEl.style.display = 'none';
+        if (placeholderEl) placeholderEl.style.display = 'block';
+        return;
+      }}
+      if (previewUrl) {{ URL.revokeObjectURL(previewUrl); previewUrl = null; }}
+      previewUrl = URL.createObjectURL(f);
+      previewEl.src = previewUrl;
+      previewEl.onload = () => {{
+        if (placeholderEl) placeholderEl.style.display = 'none';
+        previewEl.style.display = 'block';
+      }};
+    }}
+
+    function updateBadge() {{
+      if (!badgeEl) return;
+      if (orientation === 'landscape') {{
+        badgeEl.textContent = `Aspect ${{PANEL_W}}:${{PANEL_H}} (~${{ASPECT.toFixed(3)}})`;
+      }} else {{
+        badgeEl.textContent = `Aspect ${{PANEL_H}}:${{PANEL_W}} (~${{(1/ASPECT).toFixed(3)}})`;
+      }}
+    }}
+
+    function setOrientation(mode) {{
+      orientation = mode;
+      if (mode === 'landscape') {{
+        drop.style.setProperty('--ar', `${{PANEL_W}}/${{PANEL_H}}`);
+        orientLandBtn.classList.add('active');
+        orientPortBtn.classList.remove('active');
+      }} else {{
+        drop.style.setProperty('--ar', `${{PANEL_H}}/${{PANEL_W}}`);
+        orientPortBtn.classList.add('active');
+        orientLandBtn.classList.remove('active');
+      }}
+      updateBadge();
+    }}
+
+    function setFlipped(value) {{
+      flipped = value;
+      if (flipped) {{
+        orientFlipBtn.classList.add('active');
+        previewEl.style.transform = 'rotate(180deg)';
+      }} else {{
+        orientFlipBtn.classList.remove('active');
+        previewEl.style.transform = 'none';
+      }}
     }}
 
     drop.addEventListener('click', () => fileInput.click());
@@ -147,11 +250,11 @@ async fn index(state: axum::extract::State<AppState>) -> impl IntoResponse {
     drop.addEventListener('drop', e => {{
       e.preventDefault(); drop.classList.remove('dragover');
       const f = e.dataTransfer.files[0];
-      if (f) {{ file = f; hintEl.textContent = f.name; sendBtn.disabled = false; }}
+      if (f) {{ file = f; hintEl.textContent = f.name; sendBtn.disabled = false; showPreview(file); }}
     }});
     fileInput.addEventListener('change', e => {{
       const f = e.target.files[0];
-      if (f) {{ file = f; hintEl.textContent = f.name; sendBtn.disabled = false; }}
+      if (f) {{ file = f; hintEl.textContent = f.name; sendBtn.disabled = false; showPreview(file); }}
     }});
 
     async function pollStatus() {{
@@ -163,6 +266,65 @@ async fn index(state: axum::extract::State<AppState>) -> impl IntoResponse {
     }}
     setInterval(pollStatus, 1500);
     pollStatus();
+
+    // Orientation controls
+    orientLandBtn.addEventListener('click', () => setOrientation('landscape'));
+    orientPortBtn.addEventListener('click', () => setOrientation('portrait'));
+    orientFlipBtn.addEventListener('click', () => setFlipped(!flipped));
+    setOrientation(DEFAULT_PORTRAIT ? 'portrait' : 'landscape');
+    setFlipped(false);
+
+    // Calibration flow
+    async function startCalibration() {{
+      calibStartBtn.disabled = true;
+      statusEl.textContent = 'Drawing calibration arrow…';
+      try {{
+        const r = await fetch('/calibrate/start', {{ method: 'POST' }});
+        if (r.status === 423) {{
+          statusEl.textContent = 'Display busy — try calibration again later.';
+          calibStartBtn.disabled = false;
+          return;
+        }}
+        if (!r.ok) {{
+          const t = await r.text();
+          statusEl.textContent = 'Calibration error: ' + t;
+          calibStartBtn.disabled = false;
+          return;
+        }}
+        statusEl.textContent = 'Check the device. Which way does the arrow point?';
+        calibRow2.style.display = 'flex';
+      }} catch (e) {{
+        statusEl.textContent = 'Calibration start failed';
+        calibStartBtn.disabled = false;
+      }}
+    }}
+
+    async function sendCalibration(direction) {{
+      statusEl.textContent = 'Saving calibration…';
+      try {{
+        const r = await fetch('/calibrate/answer', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ direction }})
+        }});
+        if (!r.ok) {{
+          const t = await r.text();
+          statusEl.textContent = 'Calibration error: ' + t;
+          return;
+        }}
+        statusEl.textContent = 'Calibration saved. Future uploads will use this rotation.';
+        calibRow2.style.display = 'none';
+        calibStartBtn.disabled = false;
+      }} catch (e) {{
+        statusEl.textContent = 'Calibration save failed';
+      }}
+    }}
+
+    calibStartBtn.addEventListener('click', startCalibration);
+    calibUp.addEventListener('click', () => sendCalibration('up'));
+    calibRight.addEventListener('click', () => sendCalibration('right'));
+    calibDown.addEventListener('click', () => sendCalibration('down'));
+    calibLeft.addEventListener('click', () => sendCalibration('left'));
 
     sendBtn.addEventListener('click', async () => {{
       if (!file) return;
@@ -193,6 +355,7 @@ async fn index(state: axum::extract::State<AppState>) -> impl IntoResponse {
         w = state.width,
         h = state.height,
         aspect = state.aspect,
+        default_portrait = match state.clone().probe.display { Some(paperwave::DisplaySpec::El133Uf1{..}) => true, _ => false },
         disabled = if busy { "disabled" } else { "" },
         hint = if busy { "Update in progress, please wait…" } else { "" },
     );
@@ -212,6 +375,136 @@ async fn info(state: axum::extract::State<AppState>) -> impl IntoResponse {
 async fn status(state: axum::extract::State<AppState>) -> impl IntoResponse {
     let busy = !state.busy.try_lock().is_ok();
     Json(StatusResponse { busy })
+}
+
+async fn calibrate_start(state: axum::extract::State<AppState>) -> impl IntoResponse {
+    let guard = match state.busy.try_lock() {
+        Ok(g) => g,
+        Err(_) => return StatusCode::LOCKED.into_response(),
+    };
+    let probe = state.probe.clone();
+    info!("Starting calibration: drawing UP arrow");
+    let res = tokio::task::spawn_blocking(move || {
+        let rotation = paperwave::Rotation::Deg0;
+        let mut display = create_display_from_probe(rotation, &probe)?;
+        let img = arrow_image(display.input_dimensions(), 'U');
+        display.set_image(&img, 0.5, 0.0)?;
+        display.show()
+    })
+    .await
+    .map_err(|e| format!("task join error: {e}"))
+    .and_then(|r| r.map_err(|e| format!("{e}")));
+    drop(guard);
+    match res {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+async fn calibrate_answer(
+    state: axum::extract::State<AppState>,
+    Json(req): Json<CalibrateAnswerReq>,
+) -> impl IntoResponse {
+    let dir = req.direction.to_lowercase();
+    let rotation = match dir.as_str() {
+        // If UP was displayed but user saw it as RIGHT, we need to rotate -90 (Deg270)
+        "up" => paperwave::Rotation::Deg0,
+        "right" => paperwave::Rotation::Deg270,
+        "down" => paperwave::Rotation::Deg180,
+        "left" => paperwave::Rotation::Deg90,
+        _ => return (StatusCode::BAD_REQUEST, "invalid direction").into_response(),
+    };
+
+    // Save to disk and refresh in-memory cache
+    if let Err(e) = save_rotation(rotation) {
+        warn!(error = %e, "Failed saving rotation");
+    }
+    {
+        let mut lock = state.rotation_override.lock().await;
+        *lock = Some(rotation);
+    }
+    info!(?rotation, "Calibration saved");
+    StatusCode::OK.into_response()
+}
+
+fn arrow_image(dim: (u16, u16), dir: char) -> DynamicImage {
+    let (w, h) = (dim.0 as u32, dim.1 as u32);
+    let mut img = RgbImage::from_pixel(w, h, Rgb([255, 255, 255]));
+    let cx = (w / 2) as i32;
+    let tip_y = (h as f32 * 0.12) as i32;
+    let base_y = (h as f32 * 0.62) as i32;
+    let max_half = ((w as f32) * 0.35) as i32;
+    let red = Rgb([200, 20, 20]);
+
+    for y in tip_y..=base_y {
+        let t = (y - tip_y) as f32 / (base_y - tip_y).max(1) as f32;
+        let half = (max_half as f32 * t) as i32;
+        let x0 = (cx - half).max(0) as u32;
+        let x1 = (cx + half).min(w as i32 - 1) as u32;
+        for x in x0..=x1 {
+            img.put_pixel(x, y as u32, red);
+        }
+    }
+    // Shaft
+    let shaft_w = (w as f32 * 0.10).max(1.0) as i32;
+    let shaft_y0 = base_y;
+    let shaft_y1 = (h as f32 * 0.90) as i32;
+    let x0 = (cx - shaft_w / 2).max(0) as u32;
+    let x1 = (cx + shaft_w / 2).min(w as i32 - 1) as u32;
+    for y in shaft_y0..=shaft_y1 {
+        for x in x0..=x1 {
+            img.put_pixel(x, y as u32, red);
+        }
+    }
+
+    let r#dyn = DynamicImage::ImageRgb8(img);
+    match dir {
+        'U' => r#dyn,
+        'R' => DynamicImage::ImageRgba8(imageops::rotate90(&r#dyn)),
+        'D' => DynamicImage::ImageRgba8(imageops::rotate180(&r#dyn)),
+        'L' => DynamicImage::ImageRgba8(imageops::rotate270(&r#dyn)),
+        _ => r#dyn,
+    }
+}
+
+fn config_path() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        let mut p = PathBuf::from(home);
+        p.push(".config/paperwave");
+        let _ = fs::create_dir_all(&p);
+        p.push("state.json");
+        return p;
+    }
+    PathBuf::from("paperwave_state.json")
+}
+
+fn load_saved_rotation() -> Option<paperwave::Rotation> {
+    #[derive(Deserialize)]
+    struct State { rotation_deg: u16 }
+    let path = config_path();
+    let data = fs::read(path).ok()?;
+    let st: State = serde_json::from_slice(&data).ok()?;
+    match st.rotation_deg % 360 {
+        0 => Some(paperwave::Rotation::Deg0),
+        90 => Some(paperwave::Rotation::Deg90),
+        180 => Some(paperwave::Rotation::Deg180),
+        270 => Some(paperwave::Rotation::Deg270),
+        _ => None,
+    }
+}
+
+fn save_rotation(rot: paperwave::Rotation) -> std::io::Result<()> {
+    #[derive(serde::Serialize)]
+    struct State { rotation_deg: u16 }
+    let deg = match rot {
+        paperwave::Rotation::Deg0 => 0,
+        paperwave::Rotation::Deg90 => 90,
+        paperwave::Rotation::Deg180 => 180,
+        paperwave::Rotation::Deg270 => 270,
+    };
+    let path = config_path();
+    let data = serde_json::to_vec_pretty(&State { rotation_deg: deg }).unwrap();
+    fs::write(path, data)
 }
 
 async fn upload(
@@ -277,8 +570,9 @@ async fn upload(
 
     // Process update in a blocking task; keep the lock held so others are rejected.
     let probe = state.probe.clone();
+    let rotation_override = { state.rotation_override.lock().await.clone() };
     info!("Starting display update");
-    let res = tokio::task::spawn_blocking(move || update_display(&probe, &img))
+    let res = tokio::task::spawn_blocking(move || update_display(&probe, &img, rotation_override))
         .await
         .map_err(|e| format!("task join error: {e}"))
         .and_then(|r| r.map_err(|e| format!("{e}")));
@@ -297,9 +591,13 @@ async fn upload(
     }
 }
 
-fn update_display(probe: &paperwave::ProbeInfo, image: &DynamicImage) -> paperwave::Result<()> {
+fn update_display(
+    probe: &paperwave::ProbeInfo,
+    image: &DynamicImage,
+    rotation_override: Option<paperwave::Rotation>,
+) -> paperwave::Result<()> {
     // Defaults aligned with CLI: rotation 0, saturation 0.5, lighten 0.0
-    let rotation = paperwave::Rotation::Deg0;
+    let rotation = rotation_override.unwrap_or(paperwave::Rotation::Deg0);
     let mut display = create_display_from_probe(rotation, probe)?;
     display.set_image(image, 0.5, 0.0)?;
     display.show()
