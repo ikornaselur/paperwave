@@ -10,7 +10,7 @@ use spidev::{SpiModeFlags, Spidev, SpidevOptions};
 
 use super::common::{
     InkyDisplay, Rotation, clamp_aspect_resize, distribute_error, lighten_image_in_place,
-    nearest_colour, pack_luma_nibbles,
+    nearest_colour, pack_luma_nibbles, load_image_respecting_exif,
 };
 use super::error::{InkyError, Result};
 
@@ -376,7 +376,7 @@ impl InkyDisplay for InkyEl133Uf1 {
     }
 
     fn set_image_from_path(&mut self, path: &Path, saturation: f32, lighten: f32) -> Result<()> {
-        let image = image::open(path)?;
+        let image = load_image_respecting_exif(path)?;
         self.set_image(&image, saturation, lighten)
     }
 

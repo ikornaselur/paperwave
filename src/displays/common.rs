@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::fs;
 
 use image::imageops::{self, FilterType};
 use image::{DynamicImage, GenericImageView, ImageBuffer, RgbImage};
@@ -163,4 +164,84 @@ pub trait InkyDisplay {
     fn set_image_from_path(&mut self, path: &Path, saturation: f32, lighten: f32) -> Result<()>;
     fn set_image(&mut self, image: &DynamicImage, saturation: f32, lighten: f32) -> Result<()>;
     fn show(&mut self) -> Result<()>;
+}
+
+// ---- EXIF helpers ----
+
+pub fn load_image_respecting_exif(path: &Path) -> Result<DynamicImage> {
+    let bytes = fs::read(path)?;
+    let img = image::load_from_memory(&bytes)?;
+    Ok(apply_exif_orientation_bytes(&bytes, img))
+}
+
+pub fn apply_exif_orientation_bytes(bytes: &[u8], img: DynamicImage) -> DynamicImage {
+    match exif_orientation_from_jpeg(bytes) {
+        Some(90) => DynamicImage::ImageRgba8(imageops::rotate90(&img)),
+        Some(180) => DynamicImage::ImageRgba8(imageops::rotate180(&img)),
+        Some(270) => DynamicImage::ImageRgba8(imageops::rotate270(&img)),
+        _ => img,
+    }
+}
+
+fn exif_orientation_from_jpeg(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 { return None; }
+    let mut i = 2usize;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF { i += 1; continue; }
+        let marker = bytes[i+1];
+        i += 2;
+        if marker == 0xD9 || marker == 0xDA { break; }
+        if i + 2 > bytes.len() { break; }
+        let seg_len = u16::from_be_bytes([bytes[i], bytes[i+1]]) as usize;
+        i += 2;
+        if seg_len < 2 || i + seg_len - 2 > bytes.len() { break; }
+        if marker == 0xE1 {
+            let data = &bytes[i..i + seg_len - 2];
+            if data.len() >= 6 && &data[0..6] == b"Exif\0\0" {
+                return parse_tiff_orientation(&data[6..]);
+            }
+        }
+        i += seg_len - 2;
+    }
+    None
+}
+
+fn parse_tiff_orientation(tiff: &[u8]) -> Option<u16> {
+    if tiff.len() < 8 { return None; }
+    let be = if &tiff[0..2] == b"MM" { true } else if &tiff[0..2] == b"II" { false } else { return None; };
+    let u16_at = |off: usize, be: bool| -> Option<u16> {
+        if off + 2 > tiff.len() { return None; }
+        Some(if be { u16::from_be_bytes([tiff[off], tiff[off+1]]) } else { u16::from_le_bytes([tiff[off], tiff[off+1]]) })
+    };
+    let u32_at = |off: usize, be: bool| -> Option<u32> {
+        if off + 4 > tiff.len() { return None; }
+        Some(if be { u32::from_be_bytes([tiff[off], tiff[off+1], tiff[off+2], tiff[off+3]]) } else { u32::from_le_bytes([tiff[off], tiff[off+1], tiff[off+2], tiff[off+3]]) })
+    };
+    if u16_at(2, be)? != 0x002A { return None; }
+    let ifd0_off = u32_at(4, be)? as usize;
+    if ifd0_off + 2 > tiff.len() { return None; }
+    let count = u16_at(ifd0_off, be)? as usize;
+    let mut p = ifd0_off + 2;
+    for _ in 0..count {
+        if p + 12 > tiff.len() { return None; }
+        let tag = u16_at(p, be)?;
+        let typ = u16_at(p+2, be)?;
+        let cnt = u32_at(p+4, be)?;
+        let val_off = u32_at(p+8, be)? as usize;
+        if tag == 0x0112 {
+            if typ == 3 && cnt == 1 {
+                let value = if be { (val_off >> 16) as u16 } else { (val_off & 0xFFFF) as u16 };
+                return match value { 3=>Some(180), 6=>Some(90), 8=>Some(270), _=>None };
+            } else if typ == 3 && cnt >= 1 {
+                let off = val_off;
+                if off + 2 <= tiff.len() {
+                    let v = if be { u16::from_be_bytes([tiff[off], tiff[off+1]]) } else { u16::from_le_bytes([tiff[off], tiff[off+1]]) };
+                    return match v { 3=>Some(180), 6=>Some(90), 8=>Some(270), _=>None };
+                }
+            }
+            return None;
+        }
+        p += 12;
+    }
+    None
 }
