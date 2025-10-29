@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Paperwave Web</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+    .info { margin-bottom: 1rem; color: #333; }
+    .topbar { display:flex; justify-content:flex-end; margin-bottom: .5rem; }
+    .link-btn { background:none; border:none; color:#555; text-decoration:underline; cursor:pointer; font-size:.9rem; opacity:.7; }
+    .dropzone { position: relative; width: min(100%, 560px); aspect-ratio: var(--ar); border: 2px dashed #999; border-radius: 8px; color: #555; background: #fafafa; display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; }
+    .dropzone.dragover { border-color: #2a7; color: #2a7; background: #f6fff9; }
+    .controls { margin-top: 1rem; }
+    button { padding: 0.6rem 1.2rem; font-size: 1rem; }
+    .muted { color: #888; font-size: 0.9rem; }
+    #status { margin-top: 0.5rem; min-height: 1.2rem; }
+    #preview { width: 100%; height: 100%; display: none; }
+    .placeholder { color: #aaa; }
+    .badge { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.6); color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+    /* Modal */
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display:none; align-items:center; justify-content:center; z-index: 1000; }
+    .modal-card { background: #fff; border-radius: 10px; width: min(90vw, 520px); box-shadow: 0 20px 60px rgba(0,0,0,0.35); padding: 1rem 1.2rem; }
+    .modal-card h3 { margin: 0 0 .75rem 0; font-size: 1.15rem; }
+    .modal-actions { display:flex; gap:.5rem; justify-content:flex-end; margin-top:.75rem; }
+  </style>
+</head>
+<body>
+  <div class="info">
+    <strong>Detected panel:</strong> {{ width }} × {{ height }} (aspect {{ aspect_str }})
+  </div>
+  <div class="topbar"><button id="calib-open" class="link-btn">Calibrate orientation</button></div>
+  <div id="calib-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <h3>Calibrate orientation</h3>
+      <form id="calib-form">
+        <div class="muted" style="margin-bottom:.25rem">1) Show an UP arrow on the device</div>
+        <div class="modal-actions" style="justify-content:flex-start; margin-top:.25rem;">
+          <button id="calib-start" type="button">Start calibration</button>
+          <span id="calib-status" class="muted" style="flex:1"></span>
+        </div>
+        <div class="muted" style="margin:.5rem 0 .25rem 0">2) Tell us what you see</div>
+        <div style="margin-bottom:.5rem">
+          <span class="muted">Arrow points:</span>
+          <label style="margin-left:.5rem"><input type="radio" name="dir" value="up" checked> Up</label>
+          <label style="margin-left:.5rem"><input type="radio" name="dir" value="right"> Right</label>
+          <label style="margin-left:.5rem"><input type="radio" name="dir" value="down"> Down</label>
+          <label style="margin-left:.5rem"><input type="radio" name="dir" value="left"> Left</label>
+        </div>
+        <div style="margin-bottom:.5rem">
+          <span class="muted">Display orientation:</span>
+          <label style="margin-left:.5rem"><input type="radio" name="aspect" value="landscape" {{ land_checked }}> Landscape</label>
+          <label style="margin-left:1rem"><input type="radio" name="aspect" value="portrait" {{ port_checked }}> Portrait</label>
+        </div>
+        <div class="modal-actions">
+          <button id="calib-cancel" type="button">Cancel</button>
+          <button id="calib-save" type="submit">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <div id="drop" class="dropzone" aria-label="dropzone" style="--ar: {{ width }}/{{ height }}">
+    <div id="badge" class="badge">Aspect {{ width }}:{{ height }} (~{{ aspect_str }})</div>
+    <span id="placeholder" class="placeholder">Drag & drop an image, or click</span>
+    <canvas id="preview"></canvas>
+    <input id="file" type="file" accept="image/*" style="display:none" />
+  </div>
+  <div class="controls">
+    <div class="controls-row" style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap; margin-bottom:0.5rem;">
+      <label class="muted">Rotate
+        <select id="rotate" style="margin-left:0.4rem">
+          <option value="0">0°</option>
+          <option value="90">90°</option>
+          <option value="180">180°</option>
+          <option value="270">270°</option>
+        </select>
+      </label>
+      <label class="muted">Saturation
+        <input id="saturation" type="range" min="0" max="1" step="0.01" value="0.5" style="vertical-align:middle; margin-left:0.4rem" />
+        <span id="sat-val">0.50</span>
+      </label>
+      <label class="muted">Lighten
+        <input id="lighten" type="range" min="0" max="1" step="0.01" value="0" style="vertical-align:middle; margin-left:0.4rem" />
+        <span id="light-val">0.00</span>
+      </label>
+    </div>
+    <button id="send" {{ disabled_attr }}>Send to display</button>
+    <div id="hint" class="muted">{{ hint_text }}</div>
+    <div id="status"></div>
+  </div>
+  <script>
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('file');
+    const sendBtn = document.getElementById('send');
+    const statusEl = document.getElementById('status');
+    const previewEl = document.getElementById('preview');
+    const ctx = previewEl.getContext ? previewEl.getContext('2d') : null;
+    const placeholderEl = document.getElementById('placeholder');
+    const badgeEl = document.getElementById('badge');
+    const calibOpen = document.getElementById('calib-open');
+    const calibModal = document.getElementById('calib-modal');
+    const calibForm = document.getElementById('calib-form');
+    const calibStart = document.getElementById('calib-start');
+    const calibCancel = document.getElementById('calib-cancel');
+    const calibStatus = document.getElementById('calib-status');
+    const hintEl = document.getElementById('hint');
+    const rotateSel = document.getElementById('rotate');
+    const satInput = document.getElementById('saturation');
+    const lightInput = document.getElementById('lighten');
+    const satVal = document.getElementById('sat-val');
+    const lightVal = document.getElementById('light-val');
+    let file = null;
+    let previewUrl = null;
+    let currentImage = null;
+    let userRotation = 0;
+
+    const PANEL_W = {{ width }};
+    const PANEL_H = {{ height }};
+    const ASPECT = {{ aspect_str }};
+    const PORTRAIT = {{ portrait }};
+
+    function setBusy(b) {
+      sendBtn.disabled = b || !file;
+      hintEl.textContent = b ? 'Update in progress, please wait…' : (file ? file.name : '');
+    }
+
+    function showPreview(f) {
+      if (!f) {
+        if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+        previewEl.style.display = 'none';
+        if (placeholderEl) placeholderEl.style.display = 'block';
+        return;
+      }
+      if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+      previewUrl = URL.createObjectURL(f);
+      const imgEl = new Image();
+      imgEl.onload = () => {
+        currentImage = imgEl;
+        if (placeholderEl) placeholderEl.style.display = 'none';
+        previewEl.style.display = 'block';
+        renderPreview();
+      };
+      imgEl.src = previewUrl;
+    }
+
+    function updateBadge() {
+      if (!badgeEl) return;
+      if (!PORTRAIT) {
+        badgeEl.textContent = 'Aspect ' + PANEL_W + ':' + PANEL_H + ' (~' + ASPECT + ')';
+      } else {
+        badgeEl.textContent = 'Aspect ' + PANEL_H + ':' + PANEL_W + ' (~' + (1/parseFloat(ASPECT)).toFixed(3) + ')';
+      }
+    }
+
+    function renderPreview() {
+      if (!ctx || !currentImage) return;
+      const total = (userRotation) % 360;
+      const rad = total * Math.PI / 180;
+      const box = drop.getBoundingClientRect();
+      const cw = Math.max(1, Math.floor(box.width));
+      const ch = Math.max(1, Math.floor(box.height));
+      previewEl.width = cw;
+      previewEl.height = ch;
+      if (ctx.reset) ctx.reset();
+      ctx.clearRect(0,0,cw,ch);
+      const s = parseFloat(satInput.value) || 0;
+      const l = parseFloat(lightInput.value) || 0;
+      const brightness = (1.0 + 0.30 * l).toFixed(2);
+      ctx.filter = 'saturate(' + s.toFixed(2) + ') brightness(' + brightness + ')';
+      ctx.save();
+      ctx.translate(cw/2, ch/2);
+      ctx.rotate(rad);
+      const iw = currentImage.naturalWidth;
+      const ih = currentImage.naturalHeight;
+      const swap = (total % 180) !== 0;
+      const dw = swap ? ih : iw;
+      const dh = swap ? iw : ih;
+      const scale = Math.max(cw / dw, ch / dh);
+      const drawW = iw * scale;
+      const drawH = ih * scale;
+      ctx.drawImage(currentImage, -drawW/2, -drawH/2, drawW, drawH);
+      ctx.restore();
+    }
+
+    drop.addEventListener('click', () => fileInput.click());
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragover'); });
+    drop.addEventListener('dragleave', e => { drop.classList.remove('dragover'); });
+    drop.addEventListener('drop', e => {
+      e.preventDefault(); drop.classList.remove('dragover');
+      const f = e.dataTransfer.files[0];
+      if (f) { file = f; hintEl.textContent = f.name; sendBtn.disabled = false; showPreview(file); }
+    });
+    fileInput.addEventListener('change', e => {
+      const f = e.target.files[0];
+      if (f) { file = f; hintEl.textContent = f.name; sendBtn.disabled = false; showPreview(file); }
+    });
+
+    async function pollStatus() { try { const r = await fetch('/status'); const j = await r.json(); setBusy(j.busy); } catch {} }
+    setInterval(pollStatus, 1500); pollStatus();
+
+    // Initial aspect and render
+    if (!PORTRAIT) { drop.style.setProperty('--ar', PANEL_W + '/' + PANEL_H); } else { drop.style.setProperty('--ar', PANEL_H + '/' + PANEL_W); }
+    updateBadge(); renderPreview();
+
+    rotateSel.addEventListener('change', () => { userRotation = parseInt(rotateSel.value, 10) || 0; renderPreview(); });
+    function updatePreviewFilters() { const s = parseFloat(satInput.value)||0; const l=parseFloat(lightInput.value)||0; const b=(1+0.3*l).toFixed(2); previewEl.style.filter='saturate(' + s.toFixed(2) + ') brightness(' + b + ')'; }
+    function updateSat() { satVal.textContent = parseFloat(satInput.value).toFixed(2); updatePreviewFilters(); }
+    function updateLight() { lightVal.textContent = parseFloat(lightInput.value).toFixed(2); updatePreviewFilters(); }
+    satInput.addEventListener('input', updateSat); updateSat();
+    lightInput.addEventListener('input', updateLight); updateLight();
+
+    // Calibration panel
+    calibOpen.addEventListener('click', () => { calibModal.style.display = 'flex'; calibStatus.textContent=''; });
+    calibCancel.addEventListener('click', () => { calibModal.style.display = 'none'; calibStatus.textContent=''; });
+    calibStart.addEventListener('click', async () => {
+      calibStatus.textContent = 'Drawing arrow…';
+      try { const r = await fetch('/calibrate/start', { method:'POST' }); if (!r.ok) throw new Error(await r.text()); calibStatus.textContent='Arrow drawn. Select options and save.'; }
+      catch (e) { calibStatus.textContent = 'Error: ' + e.message; }
+    });
+    calibForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(calibForm);
+      const direction = (fd.get('dir') || 'up').toString();
+      const aspect = (fd.get('aspect') || 'landscape').toString();
+      calibStatus.textContent = 'Saving…';
+      try {
+        const r = await fetch('/calibrate/answer', { method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ direction, aspect }) });
+        if (!r.ok) throw new Error(await r.text());
+        calibStatus.textContent = 'Saved.'; calibModal.style.display = 'none';
+        if (aspect === 'portrait') { drop.style.setProperty('--ar', PANEL_H + '/' + PANEL_W); } else { drop.style.setProperty('--ar', PANEL_W + '/' + PANEL_H); }
+        updateBadge(); setTimeout(renderPreview, 0);
+      } catch (e) { calibStatus.textContent = 'Error: ' + e.message; }
+    });
+
+    // Upload
+    sendBtn.addEventListener('click', async () => {
+      if (!file) return;
+      sendBtn.disabled = true; statusEl.textContent = 'Uploading…';
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('rotation', String(userRotation));
+      fd.append('saturation', satInput.value);
+      fd.append('lighten', lightInput.value);
+      try {
+        const r = await fetch('/upload', { method: 'POST', body: fd });
+        if (r.status === 423) { statusEl.textContent = 'Display busy — trying again shortly…'; }
+        else if (!r.ok) { const t = await r.text(); statusEl.textContent = 'Error: ' + t; }
+        else { statusEl.textContent = 'Update sent to display.'; }
+      } catch (e) { statusEl.textContent = 'Upload failed'; }
+      finally { sendBtn.disabled = !file; }
+    });
+  </script>
+</body>
+</html>

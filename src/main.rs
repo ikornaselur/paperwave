@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{DynamicImage, Rgb, RgbImage};
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "web"))]
 mod web;
 
 #[derive(Parser, Debug)]
@@ -44,7 +44,6 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Run the web server for uploading images
-    #[cfg(target_os = "linux")]
     Web {
         /// Bind host (default: 0.0.0.0)
         #[arg(long, default_value = "0.0.0.0")]
@@ -82,13 +81,20 @@ impl From<RotationArg> for paperwave::Rotation {
 #[cfg(target_os = "linux")]
 fn main() {
     let args = Args::parse();
-    #[cfg(target_os = "linux")]
     if let Some(Command::Web { host, port }) = &args.cmd {
-        if let Err(err) = run_web(host, *port) {
-            eprintln!("Error: {err}");
-            std::process::exit(1);
+        #[cfg(all(target_os = "linux", feature = "web"))]
+        {
+            if let Err(err) = run_web(host, *port) {
+                eprintln!("Error: {err}");
+                std::process::exit(1);
+            }
+            return;
         }
-        return;
+        #[cfg(not(all(target_os = "linux", feature = "web")))]
+        {
+            eprintln!("Web server is not available in this build. Rebuild with --features web on Linux.");
+            std::process::exit(2);
+        }
     }
 
     let rotation = args.rotation.into();
@@ -121,7 +127,7 @@ fn main() {
     eprintln!("Inky display CLI can only run on Linux targets.");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "web"))]
 fn run_web(host: &str, port: u16) -> paperwave::Result<()> {
     // Perform hardware probe once and launch async server with that context
     let probe = paperwave::probe_system();
