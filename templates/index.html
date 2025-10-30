@@ -83,6 +83,7 @@
         <input id="lighten" type="range" min="0" max="1" step="0.01" value="0" style="vertical-align:middle; margin-left:0.4rem" />
         <span id="light-val">0.00</span>
       </label>
+      
     </div>
     <button id="send" {{ disabled_attr }}>Send to display</button>
     <div id="hint" class="muted">{{ hint_text }}</div>
@@ -113,6 +114,8 @@
     let previewUrl = null;
     let currentImage = null;
     let userRotation = 0;
+    const CALIB_ROT = {{ calib_deg }};
+    const IS_SPECTRA6 = {{ is_spectra6 }};
 
     const PANEL_W = {{ width }};
     const PANEL_H = {{ height }};
@@ -154,13 +157,16 @@
 
     function renderPreview() {
       if (!ctx || !currentImage) return;
+      // Use only the user-selected rotation for preview.
+      // Calibration rotation applies on-device; including it here caused mismatches.
       const total = (userRotation) % 360;
       const rad = total * Math.PI / 180;
       const box = drop.getBoundingClientRect();
       const cw = Math.max(1, Math.floor(box.width));
       const ch = Math.max(1, Math.floor(box.height));
-      previewEl.width = cw;
-      previewEl.height = ch;
+
+      // Simple filtered render
+      previewEl.width = cw; previewEl.height = ch;
       if (ctx.reset) ctx.reset();
       ctx.clearRect(0,0,cw,ch);
       const s = parseFloat(satInput.value) || 0;
@@ -180,6 +186,93 @@
       const drawH = ih * scale;
       ctx.drawImage(currentImage, -drawW/2, -drawH/2, drawW, drawH);
       ctx.restore();
+    }
+
+    // Draw crop overlay showing what would be cut from a contain-fit image
+    function drawCropOverlay(srcCtx, outCtx, cw, ch, totalDeg, iw, ih) {
+      // Compute contain-fit rectangle for the rotated image to visualize crop
+      const swap = (totalDeg % 180) !== 0;
+      const dw = swap ? ih : iw;
+      const dh = swap ? iw : ih;
+      const scaleContain = Math.min(cw / dw, ch / dh);
+      const contW = dw * scaleContain;
+      const contH = dh * scaleContain;
+      const contX = (cw - contW) / 2;
+      const contY = (ch - contH) / 2;
+      // Target aspect equals cw:ch; crop rectangle is centered inside contain image
+      const targetRatio = cw / ch;
+      let cropW, cropH;
+      if (contW / contH > targetRatio) {
+        cropH = contH;
+        cropW = cropH * targetRatio;
+      } else {
+        cropW = contW;
+        cropH = cropW / targetRatio;
+      }
+      const cropX = contX + (contW - cropW) / 2;
+      const cropY = contY + (contH - cropH) / 2;
+      // Shade outside crop within contain frame
+      outCtx.save();
+      outCtx.fillStyle = 'rgba(0,0,0,0.25)';
+      // Top
+      outCtx.fillRect(contX, contY, contW, Math.max(0, cropY - contY));
+      // Bottom
+      outCtx.fillRect(contX, cropY + cropH, contW, Math.max(0, contY + contH - (cropY + cropH)));
+      // Left
+      outCtx.fillRect(contX, cropY, Math.max(0, cropX - contX), cropH);
+      // Right
+      outCtx.fillRect(cropX + cropW, cropY, Math.max(0, contX + contW - (cropX + cropW)), cropH);
+      // Border
+      outCtx.strokeStyle = 'rgba(255,0,0,0.7)';
+      outCtx.lineWidth = 2;
+      outCtx.strokeRect(cropX + 1, cropY + 1, cropW - 2, cropH - 2);
+      outCtx.restore();
+    }
+
+    // Build device palette from saturation and detected panel type
+    function buildPalette(s) {
+      // Spectra 6
+      const spec6_sat = [ [0,0,0],[161,164,165],[208,190,71],[156,72,75],[61,59,94],[58,91,70] ];
+      const spec6_des = [ [0,0,0],[255,255,255],[255,255,0],[255,0,0],[0,0,255],[0,255,0] ];
+      // UC8159 (7-col)
+      const uc_sat = [ [57,48,57],[255,255,255],[58,91,70],[61,59,94],[156,72,75],[208,190,71],[177,106,73] ];
+      const uc_des = [ [0,0,0],[255,255,255],[0,255,0],[0,0,255],[255,0,0],[255,255,0],[255,140,0] ];
+      const base = IS_SPECTRA6 ? spec6_sat : uc_sat;
+      const des = IS_SPECTRA6 ? spec6_des : uc_des;
+      const out = [];
+      for (let i=0; i<base.length; i++) {
+        const r = base[i][0]*s + des[i][0]*(1-s);
+        const g = base[i][1]*s + des[i][1]*(1-s);
+        const b = base[i][2]*s + des[i][2]*(1-s);
+        out.push([r,g,b]);
+      }
+      // Visual adjustment: treat "white" as true white in preview so it doesn't look drab.
+      // UC8159: index 1 is white already. Spectra 6 saturated white is greyish; force to 255.
+      if (out.length > 1) {
+        out[1] = [255, 255, 255];
+      }
+      return out;
+    }
+
+    function nearest(pal, r, g, b) {
+      let bi = 0, bd = 1e12, br=0,bg=0,bb=0;
+      for (let i=0;i<pal.length;i++){
+        const pr=pal[i][0], pg=pal[i][1], pb=pal[i][2];
+        const dr=r-pr, dg=g-pg, db=b-pb; const d=dr*dr+dg*dg+db*db;
+        if (d<bd){bd=d; bi=i; br=pr; bg=pg; bb=pb;}
+      }
+      return {pi:bi, pr:Math.round(br), pg:Math.round(bg), pb:Math.round(bb)};
+    }
+
+    function distribute(work, w, h, x, y, er, eg, eb) {
+      function apply(nx, ny, f){
+        if(nx<0||ny<0||nx>=w||ny>=h) return;
+        const i=(ny*w+nx)*4;
+        work[i] = Math.max(0, Math.min(255, work[i] + er*f));
+        work[i+1] = Math.max(0, Math.min(255, work[i+1] + eg*f));
+        work[i+2] = Math.max(0, Math.min(255, work[i+2] + eb*f));
+      }
+      apply(x+1, y, 7/16); apply(x-1,y+1,3/16); apply(x,y+1,5/16); apply(x+1,y+1,1/16);
     }
 
     drop.addEventListener('click', () => fileInput.click());
@@ -208,6 +301,7 @@
     function updateLight() { lightVal.textContent = parseFloat(lightInput.value).toFixed(2); updatePreviewFilters(); }
     satInput.addEventListener('input', updateSat); updateSat();
     lightInput.addEventListener('input', updateLight); updateLight();
+    
 
     // Calibration panel
     calibOpen.addEventListener('click', () => { calibModal.style.display = 'flex'; calibStatus.textContent=''; });
