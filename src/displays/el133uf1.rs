@@ -59,13 +59,15 @@ const DESATURATED_PALETTE: [[u8; 3]; 6] = [
     [0, 255, 0],
 ];
 
+// Calibrated palette from epdoptimize library
+// https://github.com/Utzel-Butzel/epdoptimize
 const SATURATED_PALETTE: [[u8; 3]; 6] = [
-    [0, 0, 0],
-    [161, 164, 165],
-    [208, 190, 71],
-    [156, 72, 75],
-    [61, 59, 94],
-    [58, 91, 70],
+    [25, 30, 33],    // Black
+    [232, 232, 232], // White
+    [239, 222, 68],  // Yellow
+    [178, 19, 24],   // Red
+    [33, 87, 186],   // Blue
+    [18, 95, 32],    // Green
 ];
 
 const REMAP: [u8; 6] = [0, 1, 2, 3, 5, 6];

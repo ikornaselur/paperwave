@@ -14,7 +14,7 @@ struct Args {
     image: Option<PathBuf>,
 
     /// Palette saturation from 0.0 (desaturated) to 1.0 (saturated)
-    #[arg(short, long, value_name = "SAT", default_value_t = 0.5)]
+    #[arg(short, long, value_name = "SAT", default_value_t = 1.0)]
     saturation: f32,
 
     /// Lighten image before quantization (0.0 = none, 1.0 = strongest)
